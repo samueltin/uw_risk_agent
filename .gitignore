@@ -12,3 +12,5 @@ terraform.tfvars.json
 
 # Crash logs
 crash.log
+
+.venv
