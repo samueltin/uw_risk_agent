@@ -77,43 +77,58 @@ def chunk_markdown(text: str, max_chars: int = 1800) -> list[dict]:
     Returns a list of dicts: {id, section, content, char_count}
     """
     chunks = []
-
-    # Split on ## headings — keeps the heading with its content
     sections = re.split(r'\n(?=## )', text.strip())
 
     for section in sections:
         if not section.strip():
             continue
-
-        # Extract heading
-        lines = section.strip().splitlines()
-        heading = lines[0].lstrip("#").strip() if lines[0].startswith("#") else "Introduction"
-        body = "\n".join(lines[1:]).strip()
-
-        if len(section) <= max_chars:
-            # Section fits in one chunk
-            chunk_text = f"{heading}\n\n{body}".strip()
-            chunks.append(_make_chunk(chunk_text, heading, len(chunks)))
-        else:
-            # Section too large — split on blank lines (paragraph boundaries)
-            paragraphs = re.split(r'\n{2,}', body)
-            current = f"{heading}\n\n"
-
-            for para in paragraphs:
-                para = para.strip()
-                if not para:
-                    continue
-                if len(current) + len(para) + 2 > max_chars and len(current) > len(heading) + 4:
-                    chunks.append(_make_chunk(current.strip(), heading, len(chunks)))
-                    # Carry heading into next chunk for context continuity
-                    current = f"{heading} (continued)\n\n{para}\n\n"
-                else:
-                    current += para + "\n\n"
-
-            if current.strip():
-                chunks.append(_make_chunk(current.strip(), heading, len(chunks)))
+        chunks.extend(_chunk_section(section, max_chars, len(chunks)))
 
     logger.info(f"Chunked into {len(chunks)} chunks")
+    return chunks
+
+
+def _parse_section(section: str) -> tuple[str, str]:
+    """Return (heading, body) from a markdown section block."""
+    lines = section.strip().splitlines()
+    heading = lines[0].lstrip("#").strip() if lines[0].startswith("#") else "Introduction"
+    body = "\n".join(lines[1:]).strip()
+    return heading, body
+
+
+def _chunk_section(section: str, max_chars: int, chunk_offset: int) -> list[dict]:
+    """Return one or more chunks for a single markdown section."""
+    heading, body = _parse_section(section)
+
+    if len(section) <= max_chars:
+        chunk_text = f"{heading}\n\n{body}".strip()
+        return [_make_chunk(chunk_text, heading, chunk_offset)]
+
+    return _split_by_paragraphs(heading, body, max_chars, chunk_offset)
+
+
+def _split_by_paragraphs(heading: str, body: str, max_chars: int, chunk_offset: int) -> list[dict]:
+    """Split an oversized section into paragraph-bounded chunks."""
+    chunks = []
+    current = f"{heading}\n\n"
+
+    for para in re.split(r'\n{2,}', body):
+        para = para.strip()
+        if not para:
+            continue
+
+        would_overflow = len(current) + len(para) + 2 > max_chars
+        has_content_beyond_heading = len(current) > len(heading) + 4
+
+        if would_overflow and has_content_beyond_heading:
+            chunks.append(_make_chunk(current.strip(), heading, chunk_offset + len(chunks)))
+            current = f"{heading} (continued)\n\n{para}\n\n"
+        else:
+            current += para + "\n\n"
+
+    if current.strip():
+        chunks.append(_make_chunk(current.strip(), heading, chunk_offset + len(chunks)))
+
     return chunks
 
 
