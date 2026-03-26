@@ -1,0 +1,14 @@
+# Terraform state — never commit
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+
+# Secrets — never commit
+terraform.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+.env
+
+# Crash logs
+crash.log
