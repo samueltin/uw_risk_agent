@@ -28,6 +28,7 @@ from azure.ai.agents import AgentsClient
 from azure.ai.agents.models import (
     McpTool,
     AzureAISearchTool,
+    AzureAISearchQueryType,
     MessageRole,
     ToolResources,
     AzureAISearchToolResource,
@@ -181,20 +182,12 @@ def run_underwriting_assessment(
     search_tool = AzureAISearchTool(
         index_connection_id=os.environ["AZURE_SEARCH_CONNECTION_ID"],
         index_name=os.environ.get("AZURE_SEARCH_INDEX_NAME", "uw-guidelines"),
+        query_type=AzureAISearchQueryType.VECTOR_SEMANTIC_HYBRID,
     )
 
     all_tool_defs = mcp_tool.definitions + search_tool.definitions
 
-    tool_resources = ToolResources(
-        azure_ai_search=AzureAISearchToolResource(
-            index_list=[
-                AISearchIndexResource(
-                    index_connection_id=os.environ["AZURE_SEARCH_CONNECTION_ID"],
-                    index_name=os.environ.get("AZURE_SEARCH_INDEX_NAME", "uw-guidelines"),
-                )
-            ]
-        )
-    )
+    tool_resources = search_tool.resources
 
     agent  = None
     thread = None

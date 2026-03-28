@@ -44,6 +44,13 @@ from azure.search.documents.indexes.models import (
     HnswAlgorithmConfiguration,
     VectorSearchProfile,
     SearchIndex,
+    AzureOpenAIVectorizer,
+    AzureOpenAIVectorizerParameters,
+    SearchIndexerDataUserAssignedIdentity,
+    SemanticSearch,
+    SemanticConfiguration,
+    SemanticPrioritizedFields,
+    SemanticField,
 )
 from azure.search.documents.models import VectorizedQuery
 from openai import AzureOpenAI
@@ -59,7 +66,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SEARCH_ENDPOINT   = os.environ["AZURE_SEARCH_ENDPOINT"]
-SEARCH_API_KEY    = os.environ.get("AZURE_SEARCH_API_KEY")
 INDEX_NAME        = os.environ.get("AZURE_SEARCH_INDEX_NAME", "uw-guidelines")
 def _normalize_azure_openai_endpoint(endpoint: str) -> str:
     """
@@ -76,10 +82,12 @@ def _normalize_azure_openai_endpoint(endpoint: str) -> str:
     return endpoint.rstrip("/")
 
 OPENAI_ENDPOINT   = _normalize_azure_openai_endpoint(os.environ["AZURE_OPENAI_ENDPOINT"])
-# OPENAI_API_KEY    = os.environ["AZURE_OPENAI_API_KEY"]
+OPENAI_API_KEY    = os.environ.get("AZURE_OPENAI_API_KEY")
 EMBED_DEPLOYMENT  = os.environ.get("AZURE_EMBED_DEPLOYMENT", "text-embedding-3-small")
+EMBED_MODEL_NAME  = os.environ.get("AZURE_EMBED_MODEL_NAME", "text-embedding-3-small")
 EMBED_DIMENSIONS  = 1536
 GUIDELINES_PATH   = Path(__file__).parent / "uw_guidelines.md"
+VECTOR_AUTH_ID    = os.environ.get("AZURE_SEARCH_VECTOR_IDENTITY_RESOURCE_ID")
 
 
 # ---------------------------------------------------------------------------
@@ -272,11 +280,35 @@ def create_index(index_client: SearchIndexClient) -> None:
         ),
     ]
 
+    auth_identity = None
+    if VECTOR_AUTH_ID:
+        auth_identity = SearchIndexerDataUserAssignedIdentity(resource_id=VECTOR_AUTH_ID)
+        logger.info("Using user-assigned managed identity for vectorizer auth")
+    elif not OPENAI_API_KEY:
+        logger.warning(
+            "AZURE_OPENAI_API_KEY not set; vectorizer will use the Search "
+            "service's system-assigned managed identity. Ensure it is enabled "
+            "and has access to Azure OpenAI."
+        )
+
     vector_search = VectorSearch(
         algorithms=[HnswAlgorithmConfiguration(name="uw-hnsw")],
+        vectorizers=[
+            AzureOpenAIVectorizer(
+                vectorizer_name="uw-aoai-vectorizer",
+                parameters=AzureOpenAIVectorizerParameters(
+                    resource_url=OPENAI_ENDPOINT,
+                    deployment_name=EMBED_DEPLOYMENT,
+                    model_name=EMBED_MODEL_NAME,
+                    api_key=OPENAI_API_KEY,
+                    auth_identity=auth_identity,
+                ),
+            )
+        ],
         profiles=[VectorSearchProfile(
             name="uw-vector-profile",
             algorithm_configuration_name="uw-hnsw",
+            vectorizer_name="uw-aoai-vectorizer",
         )],
     )
 
@@ -284,6 +316,17 @@ def create_index(index_client: SearchIndexClient) -> None:
         name=INDEX_NAME,
         fields=fields,
         vector_search=vector_search,
+        semantic_search=SemanticSearch(
+            configurations=[
+                SemanticConfiguration(
+                    name="uw-semantic-config",
+                    prioritized_fields=SemanticPrioritizedFields(
+                        title_field=SemanticField(field_name="section"),
+                        content_fields=[SemanticField(field_name="content")],
+                    ),
+                )
+            ]
+        ),
     )
 
     existing = [i.name for i in index_client.list_indexes()]
@@ -362,16 +405,8 @@ def smoke_test(search_client: SearchClient, openai_client: AzureOpenAI) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-def _build_search_credential():
-    if SEARCH_API_KEY:
-        logger.info("Using Azure Search API key auth")
-        return AzureKeyCredential(SEARCH_API_KEY)
-    logger.info("Using Azure AD auth for Azure Search")
-    return DefaultAzureCredential()
-
-
 def main():
-    credential    = _build_search_credential()
+    credential    = DefaultAzureCredential()
     index_client  = SearchIndexClient(SEARCH_ENDPOINT, credential)
     search_client = SearchClient(SEARCH_ENDPOINT, INDEX_NAME, credential)
     openai_client = AzureOpenAI(
