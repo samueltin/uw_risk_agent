@@ -31,7 +31,6 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 from azure.identity import DefaultAzureCredential
-from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
@@ -82,7 +81,6 @@ def _normalize_azure_openai_endpoint(endpoint: str) -> str:
     return endpoint.rstrip("/")
 
 OPENAI_ENDPOINT   = _normalize_azure_openai_endpoint(os.environ["AZURE_OPENAI_ENDPOINT"])
-OPENAI_API_KEY    = os.environ.get("AZURE_OPENAI_API_KEY")
 EMBED_DEPLOYMENT  = os.environ.get("AZURE_EMBED_DEPLOYMENT", "text-embedding-3-small")
 EMBED_MODEL_NAME  = os.environ.get("AZURE_EMBED_MODEL_NAME", "text-embedding-3-small")
 EMBED_DIMENSIONS  = 1536
@@ -284,25 +282,24 @@ def create_index(index_client: SearchIndexClient) -> None:
     if VECTOR_AUTH_ID:
         auth_identity = SearchIndexerDataUserAssignedIdentity(resource_id=VECTOR_AUTH_ID)
         logger.info("Using user-assigned managed identity for vectorizer auth")
-    elif not OPENAI_API_KEY:
+    else:
         logger.warning(
-            "AZURE_OPENAI_API_KEY not set; vectorizer will use the Search "
-            "service's system-assigned managed identity. Ensure it is enabled "
-            "and has access to Azure OpenAI."
+            "Vectorizer will use the Search service's system-assigned managed identity. "
+            "Ensure it is enabled and has access to Azure OpenAI."
         )
 
+    vectorizer_params = AzureOpenAIVectorizerParameters(
+        resource_url=OPENAI_ENDPOINT,
+        deployment_name=EMBED_DEPLOYMENT,
+        model_name=EMBED_MODEL_NAME,
+        auth_identity=auth_identity,
+    )
     vector_search = VectorSearch(
         algorithms=[HnswAlgorithmConfiguration(name="uw-hnsw")],
         vectorizers=[
             AzureOpenAIVectorizer(
                 vectorizer_name="uw-aoai-vectorizer",
-                parameters=AzureOpenAIVectorizerParameters(
-                    resource_url=OPENAI_ENDPOINT,
-                    deployment_name=EMBED_DEPLOYMENT,
-                    model_name=EMBED_MODEL_NAME,
-                    api_key=OPENAI_API_KEY,
-                    auth_identity=auth_identity,
-                ),
+                parameters=vectorizer_params,
             )
         ],
         profiles=[VectorSearchProfile(
