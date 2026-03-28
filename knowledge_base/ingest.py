@@ -25,10 +25,13 @@ import re
 import json
 import hashlib
 import logging
+import time
 from pathlib import Path
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 from azure.identity import DefaultAzureCredential
+from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
@@ -44,6 +47,8 @@ from azure.search.documents.indexes.models import (
 )
 from azure.search.documents.models import VectorizedQuery
 from openai import AzureOpenAI
+from openai import RateLimitError
+from httpx import HTTPStatusError
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -54,8 +59,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SEARCH_ENDPOINT   = os.environ["AZURE_SEARCH_ENDPOINT"]
+SEARCH_API_KEY    = os.environ.get("AZURE_SEARCH_API_KEY")
 INDEX_NAME        = os.environ.get("AZURE_SEARCH_INDEX_NAME", "uw-guidelines")
-OPENAI_ENDPOINT   = os.environ["AZURE_OPENAI_ENDPOINT"]
+def _normalize_azure_openai_endpoint(endpoint: str) -> str:
+    """
+    Accept either a bare Azure OpenAI endpoint or a full request URL.
+    Return the base endpoint (scheme + host).
+    """
+    parsed = urlparse(endpoint)
+    if not parsed.scheme or not parsed.netloc:
+        return endpoint
+    if "/openai/" in parsed.path:
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        logger.warning("AZURE_OPENAI_ENDPOINT included a path; using base endpoint %s", base)
+        return base
+    return endpoint.rstrip("/")
+
+OPENAI_ENDPOINT   = _normalize_azure_openai_endpoint(os.environ["AZURE_OPENAI_ENDPOINT"])
+# OPENAI_API_KEY    = os.environ["AZURE_OPENAI_API_KEY"]
 EMBED_DEPLOYMENT  = os.environ.get("AZURE_EMBED_DEPLOYMENT", "text-embedding-3-small")
 EMBED_DIMENSIONS  = 1536
 GUIDELINES_PATH   = Path(__file__).parent / "uw_guidelines.md"
@@ -147,6 +168,50 @@ def _make_chunk(content: str, section: str, index: int) -> dict:
 # Step 2: Generate embeddings
 # ---------------------------------------------------------------------------
 
+def _embed_with_retry(openai_client: AzureOpenAI, texts: list[str]) -> list[list[float]]:
+    """
+    Call embeddings with simple exponential backoff on 429s.
+    """
+    max_attempts = 6
+    base_delay = 2.0
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = openai_client.embeddings.create(
+                input=texts,
+                model=EMBED_DEPLOYMENT,
+                dimensions=EMBED_DIMENSIONS,
+            )
+            return [d.embedding for d in response.data]
+        except RateLimitError as e:
+            # Prefer server-provided retry-after when available
+            retry_after = None
+            try:
+                retry_after = e.response.headers.get("retry-after")
+            except Exception:
+                retry_after = None
+            if attempt == max_attempts:
+                raise
+            if retry_after:
+                try:
+                    sleep_s = float(retry_after)
+                except ValueError:
+                    sleep_s = base_delay * (2 ** (attempt - 1))
+            else:
+                sleep_s = base_delay * (2 ** (attempt - 1))
+            logger.info(f"Rate limit. Backing off for {sleep_s:.1f}s (attempt {attempt}/{max_attempts})")
+            time.sleep(sleep_s)
+        except HTTPStatusError as e:
+            status = getattr(e.response, "status_code", None)
+            if status != 429 or attempt == max_attempts:
+                raise
+            sleep_s = base_delay * (2 ** (attempt - 1))
+            logger.info(f"429 throttled. Backing off for {sleep_s:.1f}s (attempt {attempt}/{max_attempts})")
+            time.sleep(sleep_s)
+
+    raise RuntimeError("Embedding retries exhausted")
+
+
 def embed_chunks(chunks: list[dict]) -> list[dict]:
     """
     Generate vector embeddings for each chunk using Azure OpenAI.
@@ -158,9 +223,11 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
         api_version="2024-02-01",
         azure_ad_token_provider=lambda: DefaultAzureCredential()
             .get_token("https://cognitiveservices.azure.com/.default").token,
+        max_retries=0,
     )
 
-    BATCH_SIZE = 16
+    BATCH_SIZE = 2
+    MIN_BATCH_DELAY_SEC = 6.0
     embedded = []
 
     for i in range(0, len(chunks), BATCH_SIZE):
@@ -170,14 +237,12 @@ def embed_chunks(chunks: list[dict]) -> list[dict]:
         logger.info(f"Embedding batch {i // BATCH_SIZE + 1} "
                     f"({len(batch)} chunks)...")
 
-        response = openai_client.embeddings.create(
-            input=texts,
-            model=EMBED_DEPLOYMENT,
-            dimensions=EMBED_DIMENSIONS,
-        )
+        embeddings = _embed_with_retry(openai_client, texts)
+        for chunk, emb in zip(batch, embeddings):
+            embedded.append({**chunk, "content_vector": emb})
 
-        for chunk, emb_obj in zip(batch, response.data):
-            embedded.append({**chunk, "content_vector": emb_obj.embedding})
+        if i + BATCH_SIZE < len(chunks):
+            time.sleep(MIN_BATCH_DELAY_SEC)
 
     logger.info(f"Embedded {len(embedded)} chunks")
     return embedded
@@ -195,6 +260,7 @@ def create_index(index_client: SearchIndexClient) -> None:
     fields = [
         SimpleField(name="id",      type=SearchFieldDataType.String, key=True),
         SimpleField(name="source",  type=SearchFieldDataType.String, filterable=True),
+        SimpleField(name="char_count", type=SearchFieldDataType.Int32, filterable=True),
         SearchableField(name="section", type=SearchFieldDataType.String),
         SearchableField(name="content", type=SearchFieldDataType.String),
         SearchField(
@@ -296,15 +362,23 @@ def smoke_test(search_client: SearchClient, openai_client: AzureOpenAI) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _build_search_credential():
+    if SEARCH_API_KEY:
+        logger.info("Using Azure Search API key auth")
+        return AzureKeyCredential(SEARCH_API_KEY)
+    logger.info("Using Azure AD auth for Azure Search")
+    return DefaultAzureCredential()
+
+
 def main():
-    credential    = DefaultAzureCredential()
+    credential    = _build_search_credential()
     index_client  = SearchIndexClient(SEARCH_ENDPOINT, credential)
     search_client = SearchClient(SEARCH_ENDPOINT, INDEX_NAME, credential)
     openai_client = AzureOpenAI(
         azure_endpoint=OPENAI_ENDPOINT,
         azure_deployment=EMBED_DEPLOYMENT,
         api_version="2024-02-01",
-        azure_ad_token_provider=lambda: credential
+        azure_ad_token_provider=lambda: DefaultAzureCredential()
             .get_token("https://cognitiveservices.azure.com/.default").token,
     )
 

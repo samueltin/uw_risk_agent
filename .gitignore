@@ -14,3 +14,7 @@ terraform.tfvars.json
 crash.log
 
 .venv
+
+connection_test
+
+infra/validated_plan.txt
