@@ -39,6 +39,7 @@ run every step, regardless of the data.
 ---
 
 ## Architecture
+![Architecture for the project](./images/uw-risk-agent-architecture.jpg)
 
 ```
 Broker submission

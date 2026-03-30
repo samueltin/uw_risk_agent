@@ -42,6 +42,7 @@ from azure.identity import DefaultAzureCredential
 
 from models.submission import UnderwritingSubmission
 from models.decision import UnderwritingDecision, Decision
+from azure.monitor.opentelemetry import configure_azure_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +351,11 @@ def _parse_decision(
 if __name__ == "__main__":
     import dotenv
     dotenv.load_dotenv()
+    configure_azure_monitor(
+        connection_string=os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
+        )
+
+    os.environ["AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED"] = "true"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s"
