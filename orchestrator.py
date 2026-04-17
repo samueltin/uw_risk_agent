@@ -43,6 +43,7 @@ from azure.identity import DefaultAzureCredential
 from models.submission import UnderwritingSubmission
 from models.decision import UnderwritingDecision, Decision
 from azure.monitor.opentelemetry import configure_azure_monitor
+from monitor.telemetry import track_llm_call, tracer
 
 logger = logging.getLogger(__name__)
 
@@ -230,16 +231,53 @@ def run_underwriting_assessment(
         # until LLM stops calling tools and returns final response.
         # ------------------------------------------------------------------
         logger.info("Starting agent run (loop is implicit in create_and_process)...")
-        run = agents_client.runs.create_and_process(
-            thread_id=thread.id,
-            agent_id=agent.id,
-            run_handler=AutoApproveMcpRunHandler(mcp_tool.headers),
-        )
-        logger.info(f"Run complete | status={run.status}")
+        with tracer.start_as_current_span("uw_agent_run") as span:
+            span.set_attribute("broker_reference", submission.broker_reference)
+            span.set_attribute("property_postcode", submission.property_postcode)
+            span.set_attribute("model", model)
 
-        if run.status == "failed":
-            raise RuntimeError(
-                f"Agent run failed: {run.last_error.message if run.last_error else 'unknown error'}"
+            run_start_ms = int(time.time() * 1000)
+            run = agents_client.runs.create_and_process(
+                thread_id=thread.id,
+                agent_id=agent.id,
+                run_handler=AutoApproveMcpRunHandler(mcp_tool.headers),
+            )
+            run_latency_ms = int(time.time() * 1000) - run_start_ms
+
+            logger.info(f"Run complete | status={run.status}")
+
+            if run.status == "failed":
+                # Track failed run before raising
+                track_llm_call(
+                    model=model,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=run_latency_ms,
+                    success=False,
+                    broker_reference=submission.broker_reference,
+                )
+                raise RuntimeError(
+                    f"Agent run failed: {run.last_error.message if run.last_error else 'unknown error'}"
+                )
+
+            # Track successful run — extract token usage from run object
+            usage = getattr(run, "usage", None)
+            prompt_tokens     = getattr(usage, "prompt_tokens", 0) if usage else 0
+            completion_tokens = getattr(usage, "completion_tokens", 0) if usage else 0
+
+            track_llm_call(
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=run_latency_ms,
+                success=True,
+                broker_reference=submission.broker_reference,
+            )
+
+            logger.info(
+                f"Telemetry emitted | prompt_tokens={prompt_tokens} | "
+                f"completion_tokens={completion_tokens} | "
+                f"latency_ms={run_latency_ms}"
             )
 
         # ------------------------------------------------------------------
