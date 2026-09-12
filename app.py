@@ -1,19 +1,42 @@
 """
 Underwriting Risk Assessment — Streamlit UI
 --------------------------------------------
-Broker-facing submission form. Submits to the agentic orchestrator
-and displays the decision with full rationale and risk flags.
+Broker-facing submission form. Posts the submission to the underwriting
+API service and displays the decision with full rationale and risk flags.
+
+The UI holds no orchestrator logic and imports no agent SDK — it speaks
+HTTP to api/main.py, which decides which orchestrator runs.
+
+    Terminal 1:  python mcp_servers/risk_server_v4.py
+    Terminal 2:  uvicorn api.main:app --port 8010
+    Terminal 3:  streamlit run app.py
 """
 
 import os
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from models.submission import UnderwritingSubmission
-from models.decision import Decision
-from orchestrator import run_underwriting_assessment
+API_URL = os.environ.get("UW_API_URL", "http://127.0.0.1:8010")
+
+# Agent runs take tens of seconds — the tool loop plus model latency.
+API_TIMEOUT = float(os.environ.get("UW_API_TIMEOUT", "300"))
+
+
+def request_assessment(payload: dict) -> dict:
+    """POST the submission to the API service and return the decision."""
+    response = requests.post(
+        f"{API_URL}/assess", json=payload, timeout=API_TIMEOUT
+    )
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        raise RuntimeError(f"API returned {response.status_code}: {detail}")
+    return response.json()
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -26,7 +49,39 @@ st.set_page_config(
 )
 
 st.title("🏠 Underwriting Risk Assessment Agent")
-st.caption("Powered by Microsoft Agent Framework · Azure OpenAI · MCP Tools · RAG")
+st.caption("Agentic underwriting over MCP tools and a RAG guidelines index")
+
+# ---------------------------------------------------------------------------
+# Sidebar — read-only service status
+#
+# The LLM is chosen by the service, via UW_LLM_PROVIDER in .env. The UI
+# only reports which one is active; it never selects one.
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=30)
+def fetch_health() -> dict:
+    """Ask the API for its status, provider and model."""
+    response = requests.get(f"{API_URL}/health", timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+with st.sidebar:
+    st.subheader("Service")
+    st.caption(f"API: `{API_URL}`")
+    try:
+        health = fetch_health()
+    except Exception as e:
+        st.error("API unreachable")
+        st.caption(f"{type(e).__name__}: {e}")
+        st.code("uvicorn api.main:app --port 8010", language="bash")
+    else:
+        st.success(f"Connected · `{health['provider']}`")
+        st.caption(f"Model: `{health['model']}`")
+        if health.get("detail"):
+            st.warning(health["detail"])
+
+        st.caption("Set `UW_LLM_PROVIDER` in .env to change, then restart the API.")
 
 # ---------------------------------------------------------------------------
 # Submission form
@@ -79,56 +134,68 @@ with st.form("submission_form"):
 # ---------------------------------------------------------------------------
 
 if submitted:
-    submission = UnderwritingSubmission(
-        applicant_name=applicant_name,
-        date_of_birth=date_of_birth,
-        occupation=occupation,
-        property_address=property_address,
-        property_postcode=property_postcode,
-        property_type=property_type,
-        year_built=int(year_built),
-        construction=construction,
-        num_storeys=int(num_storeys),
-        product_type=product_type,
-        sum_insured=float(sum_insured),
-        policy_start_date=policy_start_date,
-        claims_last_5_years=int(claims_last_5_years),
-        prior_claim_types=[t.strip() for t in prior_claim_types_str.split(",") if t.strip()],
-        outstanding_claims=outstanding_claims,
-        broker_reference=broker_reference or None,
-    )
-
-    with st.spinner("Agent assessing risk — calling tools in loop..."):
-        result = run_underwriting_assessment(submission)
+    payload = {
+        "applicant_name": applicant_name,
+        "date_of_birth": date_of_birth,
+        "occupation": occupation,
+        "property_address": property_address,
+        "property_postcode": property_postcode,
+        "property_type": property_type,
+        "year_built": int(year_built),
+        "construction": construction,
+        "num_storeys": int(num_storeys),
+        "product_type": product_type,
+        "sum_insured": float(sum_insured),
+        "policy_start_date": policy_start_date,
+        "claims_last_5_years": int(claims_last_5_years),
+        "prior_claim_types": [t.strip() for t in prior_claim_types_str.split(",") if t.strip()],
+        "outstanding_claims": outstanding_claims,
+        "broker_reference": broker_reference or None,
+    }
+    try:
+        with st.spinner("Agent assessing risk — calling tools in loop..."):
+            result = request_assessment(payload)
+    except requests.exceptions.ConnectionError:
+        st.error(
+            f"Cannot reach the underwriting API at {API_URL}. "
+            "Start it with:  uvicorn api.main:app --port 8010"
+        )
+        st.stop()
+    except requests.exceptions.Timeout:
+        st.error(f"The assessment exceeded {API_TIMEOUT:.0f}s and timed out.")
+        st.stop()
+    except RuntimeError as e:
+        st.error(str(e))
+        st.stop()
 
     # Decision banner
-    if result.decision == Decision.ACCEPT:
-        st.success(f"✅ **ACCEPT** — Confidence: {result.confidence}")
-    elif result.decision == Decision.REFER:
-        st.warning(f"⚠️ **REFER** — Confidence: {result.confidence}")
+    if result["decision"] == "ACCEPT":
+        st.success(f"✅ **ACCEPT** — Confidence: {result['confidence']}")
+    elif result["decision"] == "REFER":
+        st.warning(f"⚠️ **REFER** — Confidence: {result['confidence']}")
     else:
-        st.error(f"❌ **DECLINE** — Confidence: {result.confidence}")
+        st.error(f"❌ **DECLINE** — Confidence: {result['confidence']}")
 
     # Detail columns
     col_a, col_b = st.columns(2)
 
     with col_a:
         st.subheader("Rationale")
-        st.write(result.rationale)
+        st.write(result["rationale"])
 
-        if result.refer_reason:
-            st.info(f"**Refer reason:** {result.refer_reason}")
+        if result.get("refer_reason"):
+            st.info(f"**Refer reason:** {result['refer_reason']}")
 
-        if result.recommended_premium_loading:
-            st.metric("Premium loading", f"+{result.recommended_premium_loading:.1f}%")
+        if result.get("recommended_premium_loading"):
+            st.metric("Premium loading", f"+{result['recommended_premium_loading']:.1f}%")
 
-        st.metric("Flood Re eligible", "Yes" if result.flood_re_eligible else "No")
-        st.metric("Processing time", f"{result.processing_time_ms}ms")
+        st.metric("Flood Re eligible", "Yes" if result["flood_re_eligible"] else "No")
+        st.metric("Processing time", f"{result['processing_time_ms']}ms")
 
     with col_b:
         st.subheader("Risk Flags")
-        if result.risk_flags:
-            for flag in result.risk_flags:
+        if result["risk_flags"]:
+            for flag in result["risk_flags"]:
                 severity = "🔴" if any(x in flag for x in ["HIGH", "3B", "DECLINE", "ERROR"]) \
                            else "🟡" if any(x in flag for x in ["REFER", "ANOMALY", "TIMBER"]) \
                            else "🟢"
@@ -138,4 +205,4 @@ if submitted:
 
     # Audit trail
     with st.expander("Raw agent output (audit trail)"):
-        st.code(result.raw_agent_output, language="json")
+        st.code(result["raw_agent_output"], language="json")

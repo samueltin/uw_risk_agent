@@ -11,7 +11,7 @@ Runs the underwriting agent using Ollama on a remote Ubuntu PC
 Network layout:
   MacBook (this machine)          Ubuntu PC (192.168.2.250)
   ─────────────────────           ──────────────────────────
-  ollama_orchestrator.py  ──────► Ollama + qwen2.5:14b (GPU)
+  ollama_orchestrator_legacy.py  ──────► Ollama + qwen2.5:14b (GPU)
   risk_server_v3.py (MCP)
     └── EA flood API
     └── Police crime API
@@ -19,7 +19,7 @@ Network layout:
 Run:
   Ubuntu PC:  ollama serve   (already running as systemd service)
   Terminal 1: python mcp_servers/risk_server_v3.py
-  Terminal 2: python ollama_orchestrator.py
+  Terminal 2: python -m api.ollama_orchestrator_legacy
 
 Requirements (Mac):
   pip install ollama fastmcp httpx python-dotenv
@@ -329,7 +329,7 @@ async def run_underwriting_assessment_local(
 
 
 # ---------------------------------------------------------------------------
-# Smoke test — python ollama_orchestrator.py
+# Smoke test — python -m api.ollama_orchestrator_legacy
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

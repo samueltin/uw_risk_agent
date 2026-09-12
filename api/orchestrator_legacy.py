@@ -383,7 +383,7 @@ def _parse_decision(
 
 
 # ---------------------------------------------------------------------------
-# Smoke test — python orchestrator.py
+# Smoke test — python -m api.orchestrator_legacy
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

@@ -71,7 +71,7 @@ Broker submission
 ### MCP Server architecture
 
 ```
-orchestrator.py (MCP client)
+api/orchestrator.py (MCP client)
       │  streamable-http  http://127.0.0.1:8001/mcp
       ▼
 mcp_servers/risk_server.py (FastMCP server)
@@ -108,8 +108,11 @@ mcp_servers/risk_server.py (FastMCP server)
 
 ```
 uw_risk_agent/
-├── orchestrator.py              # Azure version — Microsoft Agent Framework loop
-├── ollama_orchestrator.py       # Local version — Ollama + explicit agentic loop
+├── api/
+│   ├── main.py                         # FastAPI service
+│   ├── orchestrator.py                 # Active orchestrator: Azure GPT-4.1 or Ollama
+│   ├── orchestrator_legacy.py          # Legacy Foundry Agent Service version
+│   └── ollama_orchestrator_legacy.py   # Legacy Ollama explicit-loop version
 ├── app.py                       # Streamlit broker-facing UI
 │
 ├── mcp_servers/
@@ -165,8 +168,8 @@ pip install -r requirements.txt
 # Terminal 1 — start the MCP server (real EA + Police APIs)
 python mcp_servers/risk_server.py
 
-# Terminal 2 — run the local orchestrator
-python ollama_orchestrator.py
+# Terminal 2 — run the API with UW_LLM_PROVIDER=ollama
+uvicorn api.main:app --port 8010 --reload
 ```
 
 To use a **remote Ollama** (e.g. GPU machine on your LAN), set in `.env`:
@@ -174,6 +177,16 @@ To use a **remote Ollama** (e.g. GPU machine on your LAN), set in `.env`:
 ```
 OLLAMA_HOST=http://192.168.2.250:11434
 ```
+
+To test API responses and decision queue routing without calling an LLM, set:
+
+```
+MOCK_DECISION=true
+```
+
+Each assessment then returns a random `ACCEPT`, `DECLINE`, or `REFER` decision.
+The normal queue dispatch and human-review handling still run. Restart FastAPI
+after changing the flag.
 
 ---
 
@@ -216,7 +229,7 @@ python knowledge_base/ingest.py
 python mcp_servers/risk_server.py
 
 # Terminal 2
-python orchestrator.py
+uvicorn api.main:app --port 8010 --reload
 
 # Or launch the Streamlit UI
 streamlit run app.py
