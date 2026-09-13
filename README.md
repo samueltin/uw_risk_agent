@@ -188,6 +188,14 @@ Each assessment then returns a random `ACCEPT`, `DECLINE`, or `REFER` decision.
 The normal queue dispatch and human-review handling still run. Restart FastAPI
 after changing the flag.
 
+The Streamlit UI has two pages in its sidebar: **New Assessment** and
+**Case Review**. The review page presents the visible ACCEPT, DECLINE, and REFER
+records as underwriting cases, with applicant, property, coverage, claims, risk
+flags, and rationale. It peeks at up to 32 messages from each configured Azure
+Storage queue without consuming them. It uses `AZURE_STORAGE_CONNECTION_STRING`
+when set, otherwise `DefaultAzureCredential` with
+`AZURE_STORAGE_ACCOUNT_NAME`.
+
 ---
 
 ## Running on Azure
