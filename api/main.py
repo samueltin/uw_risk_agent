@@ -4,7 +4,8 @@ Underwriting Risk Assessment — FastAPI service
 Exposes the underwriting process over HTTP so the Streamlit UI (or any
 other client) no longer imports an orchestrator directly.
 
-    POST /assess     run an assessment
+    POST /findings   run the MCP risk tools only (no LLM)
+    POST /assess     run a full assessment
     GET  /health     liveness plus the configured provider and model
 
 Run:
@@ -30,13 +31,19 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from .orchestrator import (
+    collect_findings,
     LLM_PROVIDER,
     ProviderError,
     active_model,
     check_provider,
     run_underwriting_assessment,
 )
-from .schemas import SubmissionRequest, DecisionResponse, HealthResponse
+from .schemas import (
+    SubmissionRequest,
+    DecisionResponse,
+    FindingsResponse,
+    HealthResponse,
+)
 
 logging.basicConfig(
     level=os.environ.get("UW_LOG_LEVEL", "INFO"),
@@ -96,6 +103,31 @@ def health() -> HealthResponse:
         model=active_model(),
         detail=detail,
     )
+
+
+@app.post("/findings", response_model=FindingsResponse, tags=["underwriting"])
+async def findings(request: SubmissionRequest) -> FindingsResponse:
+    """
+    Run the MCP risk tools and return their raw results — no LLM.
+
+    This is the deterministic half of the assessment: flood zone, crime
+    exposure, claims history and submission validation, exactly as the
+    tools report them. Fast (a few seconds) compared with /assess.
+    """
+    submission = request.to_domain()
+    logger.info(
+        f"POST /findings | broker_ref={submission.broker_reference} | "
+        f"postcode={submission.property_postcode}"
+    )
+    try:
+        data = await collect_findings(submission)
+    except Exception as e:
+        logger.exception("Findings collection failed")
+        raise HTTPException(
+            status_code=502, detail=f"Risk tools unavailable: {e}"
+        ) from e
+
+    return FindingsResponse(**data)
 
 
 @app.post("/assess", response_model=DecisionResponse, tags=["underwriting"])

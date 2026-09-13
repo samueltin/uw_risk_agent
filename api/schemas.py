@@ -92,6 +92,20 @@ class DecisionResponse(BaseModel):
         )
 
 
+class FindingsResponse(BaseModel):
+    """
+    Raw output of the MCP risk tools, before any interpretation.
+
+    Each field is whatever the tool returned, unchanged — the point is to
+    show the calibrated data a conventional system can produce on its own.
+    """
+
+    flood: dict = Field(default_factory=dict)
+    crime: dict = Field(default_factory=dict)
+    claims: dict = Field(default_factory=dict)
+    validation: dict = Field(default_factory=dict)
+
+
 class HealthResponse(BaseModel):
     status: str
     provider: str          # "azure" | "ollama"

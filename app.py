@@ -59,6 +59,20 @@ def request_assessment(payload: dict) -> dict:
 
 
 @st.cache_data(ttl=30)
+def request_findings(payload: dict) -> dict:
+    """POST the submission to the tools-only endpoint and return raw findings."""
+    response = requests.post(
+        f"{API_URL}/findings", json=payload, timeout=API_TIMEOUT
+    )
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        raise RuntimeError(f"API returned {response.status_code}: {detail}")
+    return response.json()
+
+
 def fetch_health() -> dict:
     """Ask the API for its status, provider, and model."""
     response = requests.get(f"{API_URL}/health", timeout=10)
@@ -205,7 +219,90 @@ def render_service_status() -> None:
                 st.warning(health["detail"])
 
 
+def render_findings(findings: dict) -> None:
+    """
+    Show the calibrated tool data with no interpretation.
+
+    This is deliberately flat: numbers and bands as the data sources report
+    them. Deciding what any of it means for the risk is the agent's job,
+    shown in the section below.
+    """
+    st.subheader("Findings")
+    st.caption(
+        "Calibrated data from the risk tools — no AI. "
+        "Facts only; no judgement about what they mean for this risk."
+    )
+
+    flood = findings.get("flood") or {}
+    crime = findings.get("crime") or {}
+    claims = findings.get("claims") or {}
+    validation = findings.get("validation") or {}
+
+    col_flood, col_crime, col_claims = st.columns(3)
+
+    with col_flood:
+        st.markdown("**Flood**")
+        if flood.get("error"):
+            st.warning(flood["error"])
+        else:
+            st.metric("Flood zone", _display_value(flood.get("flood_zone")))
+            st.caption(f"Flood Re eligible: {_yes_no(flood.get('flood_re_eligible'))}")
+            if flood.get("ea_severity_level"):
+                st.caption(f"EA warning: {flood['ea_severity_level']}")
+            if flood.get("data_source"):
+                st.caption(f"Source: {flood['data_source']}")
+
+    with col_crime:
+        st.markdown("**Property crime**")
+        if crime.get("error"):
+            st.warning(crime["error"])
+        elif crime.get("data_available") is False:
+            st.metric("Crime exposure", "No data")
+            st.caption(crime.get("note", "The covering police force publishes no data."))
+        else:
+            ratio = crime.get("vs_national_average")
+            st.metric(
+                "Vs national average",
+                f"{ratio}x" if ratio is not None else "Unknown",
+            )
+            if crime.get("crime_summary"):
+                st.caption(crime["crime_summary"])
+            st.caption(f"Band: {_display_value(crime.get('crime_band'))}")
+
+    with col_claims:
+        st.markdown("**Claims history**")
+        if claims.get("error"):
+            st.warning(claims["error"])
+        else:
+            st.metric(
+                "Verified claims (5yr)",
+                _display_value(claims.get("verified_claims_count")),
+            )
+            types = claims.get("claim_types") or []
+            st.caption(f"Types: {', '.join(types) if types else 'None'}")
+            st.caption(
+                f"Anomaly vs declared: {_yes_no(claims.get('claims_anomaly_detected'))}"
+            )
+
+    flags = validation.get("flags") or []
+    if flags or validation.get("summary"):
+        st.markdown("**Submission validation**")
+        if validation.get("summary"):
+            st.caption(validation["summary"])
+        for flag in flags:
+            st.caption(f"- {flag}")
+
+    with st.expander("Raw tool output"):
+        st.json(findings)
+
+
 def render_assessment_result(result: dict) -> None:
+    st.subheader("AI interpretation")
+    st.caption(
+        "What the agent concluded from the findings above, weighed against "
+        "the underwriting guidelines."
+    )
+
     if result["decision"] == "ACCEPT":
         st.success(f"ACCEPT · Confidence: {result['confidence']}")
     elif result["decision"] == "REFER":
@@ -343,6 +440,20 @@ def render_assessment_page() -> None:
         "outstanding_claims": outstanding_claims,
         "broker_reference": broker_reference or None,
     }
+
+    try:
+        with st.spinner("Gathering findings from risk tools..."):
+            findings = request_findings(payload)
+        render_findings(findings)
+        st.divider()
+    except requests.exceptions.ConnectionError:
+        st.error(
+            f"Cannot reach the underwriting API at {API_URL}. "
+            "Start it with: uvicorn api.main:app --port 8010"
+        )
+        return
+    except (requests.exceptions.Timeout, RuntimeError) as exc:
+        st.warning(f"Findings unavailable: {exc}")
 
     try:
         with st.spinner("Assessing risk..."):

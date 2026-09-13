@@ -266,6 +266,67 @@ async def _call_mcp_tool(mcp, tool_name: str, tool_args: dict) -> str:
     return result_text
 
 
+async def collect_findings(submission: UnderwritingSubmission) -> dict:
+    """
+    Call the MCP risk tools and return their results as parsed data.
+
+    No LLM involvement: this is the deterministic half of the assessment —
+    what a conventional system can produce. Interpretation is the agent's
+    job and happens separately in run_underwriting_assessment().
+    """
+    from fastmcp import Client as MCPClient
+
+    mcp_url = os.environ.get("MCP_RISK_SERVER_URL", "http://127.0.0.1:8001/mcp")
+    calls = {
+        "flood": ("get_flood_zone", {"postcode": submission.property_postcode}),
+        "crime": ("get_crime_index", {"postcode": submission.property_postcode}),
+        "claims": (
+            "get_claims_history",
+            {
+                "applicant_name": submission.applicant_name,
+                "date_of_birth": submission.date_of_birth,
+            },
+        ),
+        "validation": (
+            "validate_submission",
+            {"submission_json": submission.to_json()},
+        ),
+    }
+
+    findings: dict = {}
+    async with MCPClient(mcp_url) as mcp:
+        for key, (tool_name, tool_args) in calls.items():
+            raw = await _call_mcp_tool(mcp, tool_name, tool_args)
+            findings[key] = _as_dict(raw)
+    return findings
+
+
+def _as_dict(raw: str) -> dict:
+    """
+    Parse an MCP tool result into a dict.
+
+    _call_mcp_tool returns either a JSON object or a JSON array of text
+    blocks (the MCP content envelope), so unwrap one level when needed.
+    """
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {"error": "Tool returned unparseable output", "raw": raw}
+
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str):
+                try:
+                    inner = json.loads(item)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(inner, dict):
+                    return inner
+        return {"error": "Tool returned no object", "raw": raw}
+
+    return value if isinstance(value, dict) else {"value": value}
+
+
 async def _collect_ollama_evidence(
     submission: UnderwritingSubmission,
     mcp_url: str,
