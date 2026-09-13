@@ -596,6 +596,342 @@ def get_flight_schedule(origin: str, destination: str, date: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tool 5: get_property_sale_history (HM Land Registry Price Paid)
+# ---------------------------------------------------------------------------
+
+LAND_REGISTRY_URL = (
+    "https://landregistry.data.gov.uk/data/ppi/transaction-record.json"
+)
+
+# Buildings cover should reflect REBUILD cost, not market value. Rebuild
+# excludes land, so it is normally well below the sale price in most of the
+# country — a sum insured under the sale price is ordinary, not a red flag.
+# These bounds only catch the implausible ends.
+SUM_INSURED_OVER_RATIO = 2.5    # cover far above value — possible overinsurance
+SUM_INSURED_UNDER_RATIO = 0.25  # cover far below value — possible underinsurance
+
+
+def _lr_date(value) -> tuple[str, int | None]:
+    """
+    Normalise a Land Registry transactionDate to (ISO date, year).
+
+    The API returns RFC-1123-ish strings such as "Thu, 14 Aug 2014", not
+    ISO dates, so sorting or slicing the raw value gives wrong answers.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return "", None
+    for fmt in ("%a, %d %b %Y", "%Y-%m-%d", "%d %b %Y"):
+        try:
+            parsed = datetime.strptime(value.strip(), fmt)
+            return parsed.strftime("%Y-%m-%d"), parsed.year
+        except ValueError:
+            continue
+    return value, None
+
+
+def _lr_label(node) -> str | None:
+    """Pull the human label out of a linked-data node."""
+    if not isinstance(node, dict):
+        return node if isinstance(node, str) else None
+    for key in ("prefLabel", "label"):
+        values = node.get(key)
+        if isinstance(values, list) and values:
+            first = values[0]
+            if isinstance(first, dict):
+                return first.get("_value")
+            if isinstance(first, str):
+                return first
+    return None
+
+
+@mcp.tool()
+async def get_property_sale_history(
+    postcode: str,
+    house_number: str = "",
+    sum_insured: float = 0,
+) -> dict:
+    """
+    Returns HM Land Registry Price Paid sale history for a UK postcode.
+
+    Use to sanity-check the sum insured at submission stage. Pass
+    house_number to narrow to one property; omit it to see the postcode.
+
+    IMPORTANT when interpreting: buildings sum insured should be the
+    REBUILD cost, which excludes land and is normally LOWER than the sale
+    price. A sum insured below the last sale price is therefore normal and
+    not by itself a concern. Only marked ratios are worth acting on.
+
+    Sale prices are historic and not inflation-adjusted — check sale_year
+    before drawing conclusions from an old transaction.
+
+    Args:
+        postcode: UK postcode, e.g. "BS9 3AA"
+        house_number: Optional building number/name to match exactly
+        sum_insured: Optional requested cover, to compute the ratio check
+
+    Returns sales list plus, when sum_insured is given, a valuation_check.
+    """
+    postcode_clean = postcode.strip().upper()
+
+    params = {
+        "propertyAddress.postcode": postcode_clean,
+        "_pageSize": "20",
+        "_sort": "-transactionDate",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                LAND_REGISTRY_URL,
+                params=params,
+                headers={"Accept": "application/json"},
+            )
+            if resp.status_code != 200:
+                return {
+                    "error": f"Land Registry returned HTTP {resp.status_code}",
+                    "postcode": postcode_clean,
+                    "data_source": "HM Land Registry Price Paid Data",
+                }
+            items = resp.json().get("result", {}).get("items", [])
+    except httpx.HTTPError as e:
+        return {
+            "error": f"Land Registry unreachable: {e}",
+            "postcode": postcode_clean,
+            "data_source": "HM Land Registry Price Paid Data",
+        }
+
+    sales = []
+    for item in items:
+        address = item.get("propertyAddress", {}) or {}
+        paon = str(address.get("paon", "") or "")
+
+        if house_number and paon.strip().upper() != house_number.strip().upper():
+            continue
+
+        iso_date, year = _lr_date(item.get("transactionDate"))
+        sales.append({
+            "price_paid": item.get("pricePaid"),
+            "transaction_date": iso_date,
+            "sale_year": year,
+            "property_type": _lr_label(item.get("propertyType")),
+            "estate_type": _lr_label(item.get("estateType")),
+            "new_build": item.get("newBuild"),
+            "address": " ".join(
+                str(address.get(k, "")) for k in ("paon", "street", "town")
+                if address.get(k)
+            ).strip(),
+        })
+
+    if not sales:
+        return {
+            "postcode": postcode_clean,
+            "house_number": house_number or None,
+            "sales_found": 0,
+            "note": (
+                "No Price Paid records for this postcode. Common for new "
+                "builds, properties unsold since 1995, and non-residential "
+                "addresses. Absence of a record is not itself a risk signal."
+            ),
+            "data_source": "HM Land Registry Price Paid Data",
+        }
+
+    sales.sort(key=lambda x: x["transaction_date"] or "", reverse=True)
+    latest = sales[0]
+    prices = sorted(s["price_paid"] for s in sales if s.get("price_paid"))
+    median_price = (
+        (prices[len(prices) // 2 - 1] + prices[len(prices) // 2]) // 2
+        if len(prices) % 2 == 0 else prices[len(prices) // 2]
+    ) if prices else None
+
+    result = {
+        "postcode": postcode_clean,
+        "house_number": house_number or None,
+        "sales_found": len(sales),
+        "latest_sale": latest,
+        "postcode_median_price": median_price,
+        "sales": sales[:10],
+        "data_source": "HM Land Registry Price Paid Data",
+    }
+
+    # A postcode holds many different properties. Comparing the cover on one
+    # house against whatever sold most recently nearby produces nonsense —
+    # a neighbouring mansion makes an ordinary policy look underinsured. So
+    # only judge when we can identify the subject property.
+    if sum_insured and not house_number:
+        result["valuation_check"] = {
+            "sum_insured": sum_insured,
+            "verdict": "NOT_ASSESSED",
+            "note": (
+                "No house number supplied, so the sum insured could not be "
+                "compared against this property's own sale history. The "
+                "postcode contains multiple properties at different values "
+                f"(£{prices[0]:,} to £{prices[-1]:,} across {len(prices)} "
+                "sales). Supply house_number to run the check."
+            ),
+        }
+    elif sum_insured and latest.get("price_paid"):
+        ratio = round(sum_insured / latest["price_paid"], 2)
+        if ratio >= SUM_INSURED_OVER_RATIO:
+            verdict = "POSSIBLE_OVERINSURANCE"
+            note = (
+                f"Sum insured is {ratio}x the last sale price "
+                f"(£{latest['price_paid']:,} in {latest['sale_year']}). "
+                "Verify the rebuild-cost assessment."
+            )
+        elif ratio <= SUM_INSURED_UNDER_RATIO:
+            verdict = "POSSIBLE_UNDERINSURANCE"
+            note = (
+                f"Sum insured is only {ratio}x the last sale price "
+                f"(£{latest['price_paid']:,} in {latest['sale_year']}). "
+                "Risk of average being applied at claim stage."
+            )
+        else:
+            verdict = "PLAUSIBLE"
+            note = (
+                f"Sum insured is {ratio}x the last sale price, within the "
+                "normal range for rebuild cost versus market value."
+            )
+
+        result["valuation_check"] = {
+            "sum_insured": sum_insured,
+            "latest_sale_price": latest["price_paid"],
+            "sale_year": latest["sale_year"],
+            "ratio_to_sale_price": ratio,
+            "verdict": verdict,
+            "note": note,
+            "caveat": (
+                "Sale price is historic and not inflation-adjusted; rebuild "
+                "cost excludes land value."
+            ),
+        }
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: check_business_registrations (Companies House)
+# ---------------------------------------------------------------------------
+
+COMPANIES_HOUSE_URL = (
+    "https://api.company-information.service.gov.uk/advanced-search/companies"
+)
+
+
+@mcp.tool()
+async def check_business_registrations(postcode: str, house_number: str = "") -> dict:
+    """
+    Returns companies registered at a UK postcode (Companies House).
+
+    Use to detect a residential property also serving as a registered
+    business address, which affects occupancy risk and may fall outside a
+    standard residential policy.
+
+    Interpret with care: a registered office is an administrative address,
+    not proof of trading activity at the property. Many sole traders
+    register at a home address and carry on no business there. Treat a hit
+    as something to ask the broker about, not as an automatic decline.
+
+    Requires COMPANIES_HOUSE_API_KEY. Without it the tool reports that the
+    check could not be run, rather than implying no businesses exist.
+
+    Args:
+        postcode: UK postcode, e.g. "BS9 3AA"
+        house_number: Optional building number/name to narrow the match
+    """
+    import os
+
+    postcode_clean = postcode.strip().upper()
+    api_key = os.environ.get("COMPANIES_HOUSE_API_KEY", "").strip()
+
+    if not api_key:
+        return {
+            "postcode": postcode_clean,
+            "check_performed": False,
+            "note": (
+                "COMPANIES_HOUSE_API_KEY is not configured, so business "
+                "registrations could not be checked. Do not treat this as "
+                "confirmation that the property has no business use."
+            ),
+            "data_source": "Companies House API",
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                COMPANIES_HOUSE_URL,
+                params={"location": postcode_clean, "size": "50"},
+                auth=(api_key, ""),
+            )
+            if resp.status_code == 401:
+                return {
+                    "postcode": postcode_clean,
+                    "check_performed": False,
+                    "error": "Companies House rejected the API key (HTTP 401).",
+                    "data_source": "Companies House API",
+                }
+            if resp.status_code != 200:
+                return {
+                    "postcode": postcode_clean,
+                    "check_performed": False,
+                    "error": f"Companies House returned HTTP {resp.status_code}",
+                    "data_source": "Companies House API",
+                }
+            items = resp.json().get("items", [])
+    except httpx.HTTPError as e:
+        return {
+            "postcode": postcode_clean,
+            "check_performed": False,
+            "error": f"Companies House unreachable: {e}",
+            "data_source": "Companies House API",
+        }
+
+    companies = []
+    for item in items:
+        office = item.get("registered_office_address", {}) or {}
+        premises = str(office.get("premises", "") or "")
+        line1 = str(office.get("address_line_1", "") or "")
+
+        if house_number:
+            wanted = house_number.strip().upper()
+            if wanted not in premises.upper() and not line1.upper().startswith(wanted):
+                continue
+
+        companies.append({
+            "company_name": item.get("company_name"),
+            "company_number": item.get("company_number"),
+            "company_status": item.get("company_status"),
+            "company_type": item.get("company_type"),
+            "incorporated_on": item.get("date_of_creation"),
+            "sic_codes": item.get("sic_codes"),
+            "registered_office": ", ".join(
+                str(office.get(k, "")) for k in
+                ("premises", "address_line_1", "locality", "postal_code")
+                if office.get(k)
+            ),
+        })
+
+    active = [c for c in companies if c.get("company_status") == "active"]
+
+    return {
+        "postcode": postcode_clean,
+        "house_number": house_number or None,
+        "check_performed": True,
+        "companies_found": len(companies),
+        "active_companies": len(active),
+        "business_address_flag": bool(active),
+        "companies": companies[:10],
+        "note": (
+            f"{len(active)} active compan{'y' if len(active) == 1 else 'ies'} "
+            "registered at this address. A registered office is not proof of "
+            "trading at the property — confirm actual use with the broker."
+            if active else
+            "No active companies registered at this address."
+        ),
+        "data_source": "Companies House API",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

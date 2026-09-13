@@ -284,6 +284,45 @@ def render_findings(findings: dict) -> None:
                 f"Anomaly vs declared: {_yes_no(claims.get('claims_anomaly_detected'))}"
             )
 
+    sale_history = findings.get("sale_history") or {}
+    business = findings.get("business") or {}
+
+    col_value, col_business = st.columns(2)
+
+    with col_value:
+        st.markdown("**Sum insured vs sale history**")
+        check = sale_history.get("valuation_check") or {}
+        if sale_history.get("error"):
+            st.warning(sale_history["error"])
+        elif not sale_history.get("sales_found"):
+            st.metric("Land Registry sales", "None found")
+            st.caption(sale_history.get("note", ""))
+        else:
+            latest = sale_history.get("latest_sale") or {}
+            price = latest.get("price_paid")
+            st.metric(
+                "Last sale price",
+                f"£{price:,}" if price else "Unknown",
+                delta=f"{check['ratio_to_sale_price']}x cover" if check else None,
+                delta_color="off",
+            )
+            st.caption(
+                f"{latest.get('property_type', 'property')} · "
+                f"sold {latest.get('sale_year', 'unknown year')} · "
+                f"{sale_history.get('sales_found')} sale(s) in postcode"
+            )
+            if check.get("note"):
+                st.caption(check["note"])
+
+    with col_business:
+        st.markdown("**Business registrations**")
+        if not business.get("check_performed"):
+            st.metric("Companies at address", "Not checked")
+            st.caption(business.get("error") or business.get("note", ""))
+        else:
+            st.metric("Active companies", business.get("active_companies", 0))
+            st.caption(business.get("note", ""))
+
     flags = validation.get("flags") or []
     if flags or validation.get("summary"):
         st.markdown("**Submission validation**")

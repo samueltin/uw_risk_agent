@@ -131,7 +131,23 @@ Tools available:
   - get_flood_zone(postcode): flood risk and Flood Re eligibility
   - get_crime_index(postcode): property crime exposure
   - get_claims_history(applicant_name, date_of_birth): verify prior claims
+  - get_property_sale_history(postcode, house_number, sum_insured): Land
+      Registry sale prices, with a sum-insured plausibility check
+  - check_business_registrations(postcode, house_number): companies
+      registered at the address
   - search_uw_guidelines(query): search the underwriting guidelines knowledge base
+
+Reading the tool results:
+  - Buildings cover is REBUILD cost and excludes land, so a sum insured
+    below the last sale price is normal. Act only on the tool's own
+    verdict (POSSIBLE_OVERINSURANCE / POSSIBLE_UNDERINSURANCE), and note
+    that sale prices are historic and not inflation-adjusted.
+  - A registered office is an administrative address, not proof of trading
+    at the property. Treat a company hit as a question for the broker
+    about occupancy, not as an automatic decline.
+  - If a tool reports that data was unavailable (for example crime_band
+    DATA_UNAVAILABLE, or check_performed false), treat the risk as
+    UNASSESSED and refer. Never read missing data as a low-risk result.
 
 Decision criteria (apply judgement — these are guides, not rigid rules):
   ACCEPT:  No referral triggers. Risk within appetite. No mandatory exclusions.
@@ -266,6 +282,18 @@ async def _call_mcp_tool(mcp, tool_name: str, tool_args: dict) -> str:
     return result_text
 
 
+def _house_number(address: str) -> str:
+    """
+    Pull the building number from the start of a street address.
+
+    Land Registry matches on the primary addressable object name (paon),
+    which for most homes is the house number. Without it the sale check
+    cannot tell the subject property from its neighbours.
+    """
+    first = (address or "").strip().split(",")[0].strip().split(" ")
+    return first[0] if first and first[0][:1].isdigit() else ""
+
+
 async def collect_findings(submission: UnderwritingSubmission) -> dict:
     """
     Call the MCP risk tools and return their results as parsed data.
@@ -285,6 +313,21 @@ async def collect_findings(submission: UnderwritingSubmission) -> dict:
             {
                 "applicant_name": submission.applicant_name,
                 "date_of_birth": submission.date_of_birth,
+            },
+        ),
+        "sale_history": (
+            "get_property_sale_history",
+            {
+                "postcode": submission.property_postcode,
+                "house_number": _house_number(submission.property_address),
+                "sum_insured": submission.sum_insured,
+            },
+        ),
+        "business": (
+            "check_business_registrations",
+            {
+                "postcode": submission.property_postcode,
+                "house_number": _house_number(submission.property_address),
             },
         ),
         "validation": (
@@ -340,6 +383,8 @@ async def _collect_ollama_evidence(
         "get_flood_zone": None,
         "get_crime_index": None,
         "get_claims_history": None,
+        "get_property_sale_history": None,
+        "check_business_registrations": None,
     }
 
     async with MCPClient(mcp_url) as mcp:
@@ -358,6 +403,23 @@ async def _collect_ollama_evidence(
             {
                 "applicant_name": submission.applicant_name,
                 "date_of_birth": submission.date_of_birth,
+            },
+        )
+        evidence["get_property_sale_history"] = await _call_mcp_tool(
+            mcp,
+            "get_property_sale_history",
+            {
+                "postcode": submission.property_postcode,
+                "house_number": _house_number(submission.property_address),
+                "sum_insured": submission.sum_insured,
+            },
+        )
+        evidence["check_business_registrations"] = await _call_mcp_tool(
+            mcp,
+            "check_business_registrations",
+            {
+                "postcode": submission.property_postcode,
+                "house_number": _house_number(submission.property_address),
             },
         )
 
@@ -480,7 +542,8 @@ async def _run_assessment_async(
             "get_flood_zone",
             "get_crime_index",
             "get_claims_history",
-            "get_flight_schedule",
+            "get_property_sale_history",
+            "check_business_registrations",
         ],
     )
 
