@@ -2,7 +2,8 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
 ![Azure](https://img.shields.io/badge/Azure-AI%20Foundry-0078D4?logo=microsoft-azure)
-![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o-412991?logo=openai)
+![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4.1-412991?logo=openai)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi)
 ![MCP](https://img.shields.io/badge/MCP-Model%20Context%20Protocol-brightgreen)
 ![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC?logo=terraform)
 ![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit)
@@ -10,8 +11,12 @@
 
 A production-grade agentic AI system for UK property insurance underwriting.
 Built with **Microsoft Agent Framework**, **MCP (Model Context Protocol)**,
-**Azure OpenAI**, and **Azure AI Search RAG**. Runs fully locally with Ollama
-or in the cloud via Azure AI Foundry.
+**Azure OpenAI**, and **Azure AI Search RAG**, served over **FastAPI**.
+Runs fully locally with Ollama or against Azure OpenAI.
+
+The agent loop runs **in the API process**, not in a hosted service, so the
+MCP connection is client-side and a `localhost` MCP server works without a
+tunnel or public endpoint.
 
 ---
 
@@ -36,6 +41,11 @@ immediately search guidelines for mandatory exclusions, and return **DECLINE**
 call all tools and still return **REFER**. A pipeline approach would always
 run every step, regardless of the data.
 
+**Caveat, stated honestly:** this applies to the Azure provider. The local
+Ollama path is a deterministic pipeline — `llama3.1:8b` is not reliable
+enough over a multi-turn tool loop, so the tools are called in code and the
+model is asked once for the decision. See *Key design decisions*.
+
 ---
 
 ## Architecture
@@ -45,19 +55,21 @@ run every step, regardless of the data.
 Broker submission
       │
       ▼
-┌─────────────────────────────────────────────────────┐
-│  Azure AI Foundry — Implicit Agent Loop             │
-│                                                     │
-│  GPT-4o (GlobalStandard)                            │
-│   ├── validate_submission()    ← MCP tool           │
-│   ├── get_flood_zone()         ← MCP tool (EA API)  │
-│   ├── get_crime_index()        ← MCP tool (Police API) │
-│   ├── get_claims_history()     ← MCP tool           │
-│   └── search_uw_guidelines()   ← Azure AI Search RAG│
-│                                                     │
-│  Loop: LLM → tool call → result → LLM → repeat     │
-│  until LLM produces final JSON decision             │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  Agent loop — runs in the API process (MAF)              │
+│                                                          │
+│  Azure gpt-4.1  or  Ollama llama3.1:8b                   │
+│   ├── validate_submission()          ← MCP tool          │
+│   ├── get_flood_zone()               ← MCP tool (EA API) │
+│   ├── get_crime_index()              ← MCP tool (Police) │
+│   ├── get_claims_history()           ← MCP tool          │
+│   ├── get_property_sale_history()    ← MCP tool (Land Reg)│
+│   ├── check_business_registrations() ← MCP tool (Cos Hse)│
+│   └── search_uw_guidelines()         ← Azure AI Search RAG│
+│                                                          │
+│  Loop: LLM → tool call → result → LLM → repeat           │
+│  until LLM produces final JSON decision                  │
+└──────────────────────────────────────────────────────────┘
       │
       ▼
 { decision: ACCEPT | REFER | DECLINE,
@@ -65,7 +77,8 @@ Broker submission
   flood_re_eligible, refer_reason,
   recommended_premium_loading }
       │
-   REFER? → Human review queue (stub → Service Bus in production)
+   Every decision → Azure Storage Queue (accept / refer / decline)
+   REFER?          → also logged to the human review handler
 ```
 
 ### MCP Server architecture
@@ -74,14 +87,19 @@ Broker submission
 api/orchestrator.py (MCP client)
       │  streamable-http  http://127.0.0.1:8001/mcp
       ▼
-mcp_servers/risk_server.py (FastMCP server)
-      ├── validate_submission()     → business logic
-      ├── get_flood_zone()          → Environment Agency flood API
-      │                               + static Zone 3a/3b fallback layer
-      ├── get_crime_index()         → data.police.uk street-level crime API
-      │                               (calibrated multiplier, property crimes only)
-      ├── get_claims_history()      → mock CUE database
-      └── get_flight_schedule()     → intentionally irrelevant tool (see below)
+mcp_servers/risk_server_v4.py (FastMCP server)
+      ├── validate_submission()           → business logic
+      ├── get_flood_zone()                → Environment Agency flood API
+      │                                     + static Zone 3a/3b fallback layer
+      ├── get_crime_index()               → data.police.uk street-level crime API
+      │                                     (property crimes only; reports a
+      │                                     multiple of the national average, and
+      │                                     DATA_UNAVAILABLE where a force
+      │                                     publishes nothing)
+      ├── get_claims_history()            → mock CUE database
+      ├── get_property_sale_history()     → HM Land Registry Price Paid
+      │                                     (sum-insured plausibility check)
+      └── check_business_registrations()  → Companies House (needs API key)
 ```
 
 ---
@@ -90,13 +108,15 @@ mcp_servers/risk_server.py (FastMCP server)
 
 | Layer | Technology |
 |---|---|
-| Agent framework | Microsoft Agent Framework (`azure-ai-agents`) |
-| LLM — cloud | Azure OpenAI GPT-4o (GlobalStandard) |
-| LLM — local | Ollama `qwen2.5:14b` on GTX 1070 |
+| Agent framework | Microsoft Agent Framework (`agent-framework`) |
+| API | FastAPI + Uvicorn |
+| LLM — cloud | Azure OpenAI `gpt-4.1` (GlobalStandard) |
+| LLM — local | Ollama `llama3.1:8b` on GTX 1070 |
 | Tool protocol | MCP — Model Context Protocol (FastMCP, streamable-http) |
 | Knowledge base | Azure AI Search + RAG (UW guidelines) |
 | Embeddings | Azure OpenAI `text-embedding-3-small` |
-| External APIs | Environment Agency flood API, data.police.uk crime API |
+| External APIs | Environment Agency flood, data.police.uk crime, HM Land Registry Price Paid, Companies House |
+| Decision dispatch | Azure Storage Queues (accept / refer / decline) |
 | UI | Streamlit |
 | Infrastructure | Terraform (azurerm provider) |
 | Auth | Azure DefaultAzureCredential (Entra ID) |
@@ -116,7 +136,7 @@ uw_risk_agent/
 ├── app.py                       # Streamlit broker-facing UI
 │
 ├── mcp_servers/
-│   └── risk_server.py           # FastMCP server: 5 tools (4 real + 1 test)
+│   └── risk_server_v4.py        # FastMCP server: 6 underwriting tools
 │
 ├── models/
 │   ├── submission.py            # UnderwritingSubmission dataclass
@@ -126,17 +146,42 @@ uw_risk_agent/
 │   ├── uw_guidelines.md         # UK P&C underwriting guidelines document
 │   └── ingest.py                # Chunk → embed → index into Azure AI Search
 │
-├── infra/                       # Terraform IaC
-│   ├── main.tf                  # Azure resources
-│   ├── variables.tf
-│   ├── outputs.tf
-│   └── terraform.tfvars.example
+├── monitor/
+│   └── telemetry.py             # App Insights / OpenTelemetry helpers
+│
+├── infra/
+│   ├── terraform/               # Terraform IaC
+│   └── bicep/                   # Bicep alternative
 │
 ├── tests/                       # Test cases
-├── .env.example
+├── env.example
 ├── requirements.txt
 └── README.md
 ```
+
+---
+
+## API
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /assess` | Full assessment — tools plus LLM interpretation (~15–40s) |
+| `POST /findings` | MCP risk tools only, no LLM (a few seconds) |
+| `GET /health` | Liveness plus the configured provider and model |
+
+Interactive docs at `http://127.0.0.1:8010/docs`.
+
+Which LLM runs is fixed by `UW_LLM_PROVIDER` in `.env` (`azure` or `ollama`).
+It is a deployment decision: clients send insurance data only and cannot
+select an engine. Changing it requires an API restart.
+
+The **New Assessment** page uses both endpoints in sequence, and shows them
+as two sections:
+
+1. **Findings** — calibrated data from the risk tools, with no
+   interpretation. This is what a conventional system can produce on its own.
+2. **AI interpretation** — the agent's decision, rationale and risk flags,
+   weighed against the underwriting guidelines.
 
 ---
 
@@ -153,8 +198,8 @@ The Ollama version runs the full agentic loop on local hardware. Tested on:
 brew install ollama          # macOS
 # or: https://ollama.com/download for Linux/Windows
 
-# Pull the model (4.7GB download for 14b, fits in 8GB VRAM)
-ollama pull qwen2.5:14b
+# Pull the model (4.9GB, fits in 8GB VRAM)
+ollama pull llama3.1:8b
 
 # Install Python dependencies
 python -m venv .venv
@@ -165,18 +210,35 @@ pip install -r requirements.txt
 ### Run locally
 
 ```bash
-# Terminal 1 — start the MCP server (real EA + Police APIs)
-python mcp_servers/risk_server.py
+# Terminal 1 — start the MCP server (real EA + Police + Land Registry APIs)
+python mcp_servers/risk_server_v4.py
 
 # Terminal 2 — run the API with UW_LLM_PROVIDER=ollama
 uvicorn api.main:app --port 8010 --reload
+
+# Terminal 3 — the UI (talks to the API over HTTP; it imports no agent code)
+streamlit run app.py
 ```
 
 To use a **remote Ollama** (e.g. GPU machine on your LAN), set in `.env`:
 
 ```
 OLLAMA_HOST=http://192.168.2.250:11434
+OLLAMA_MODEL=llama3.1:8b
 ```
+
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `UW_LLM_PROVIDER` | `azure` or `ollama` — which LLM drives the agent |
+| `OLLAMA_HOST` / `OLLAMA_MODEL` | Local provider target |
+| `AZURE_OPENAI_MODEL` | Cloud deployment name (default `gpt-4.1`) |
+| `MCP_RISK_SERVER_URL` | MCP server, default `http://127.0.0.1:8001/mcp` |
+| `UW_API_URL` | Where the Streamlit UI finds the API (default `:8010`) |
+| `AZURE_STORAGE_ACCOUNT_NAME` | Storage account holding the decision queues |
+| `COMPANIES_HOUSE_API_KEY` | Optional — enables the business-address check |
+| `MOCK_DECISION` | `true` returns a random decision without calling an LLM |
 
 To test API responses and decision queue routing without calling an LLM, set:
 
@@ -212,7 +274,7 @@ terraform plan
 terraform apply
 ```
 
-Provisions: Resource Group, OpenAI account (GPT-4o + embedding deployments),
+Provisions: Resource Group, OpenAI account (`gpt-4.1` + embedding deployments),
 AI Search, AI Foundry Hub + Project, Key Vault, Storage Account.
 
 ### 2. Configure environment
@@ -234,12 +296,12 @@ python knowledge_base/ingest.py
 
 ```bash
 # Terminal 1
-python mcp_servers/risk_server.py
+python mcp_servers/risk_server_v4.py
 
 # Terminal 2
 uvicorn api.main:app --port 8010 --reload
 
-# Or launch the Streamlit UI
+# Terminal 3
 streamlit run app.py
 ```
 
@@ -250,7 +312,7 @@ streamlit run app.py
 High-risk test case: BS1 4DJ, Bristol — timber frame 1912, 2 claims including
 subsidence, Zone 3a flood area.
 
-**Azure run (GPT-4o, 34 seconds):**
+**Azure run (`gpt-4.1`, ~30-40 seconds):**
 
 ```
 DECISION   : DECLINE
@@ -259,48 +321,18 @@ RATIONALE  : The property has timber construction dating to 1912 and is located
              in Flood Zone 3a, categorised as high flood risk. The combination
              of pre-1920 timber construction and Zone 3a flood is outside
              underwriting appetite and flagged as a mandatory exclusion.
-FLAGS      : Flood Zone 3a, High flood risk, Timber pre-1920 construction
-FLOOD RE   : No
-TIME       : 33844ms
-```
-
-**Local run (qwen2.5:14b on GTX 1070, ~6 minutes):**
-
-```
-DECISION   : REFER
-CONFIDENCE : HIGH
-RATIONALE  : The property has a Zone 3a flood risk and timber frame
-             construction built before 1920, both of which require referral.
-             Additionally, the crime index is very high (81-100).
-FLAGS      : TIMBER_PRE_1920_HIGH_RISK, ZONE_3A_FLOOD
+FLAGS      : TIMBER_PRE_1920_HIGH_RISK, ZONE_3A_HIGH_FLOOD,
+             VERY_HIGH_PROPERTY_CRIME
 FLOOD RE   : Yes
-REFER NOTE : Timber frame construction, Zone 3a flood risk, very high crime band
-TIME       : 346595ms
+TIME       : 41655ms
 ```
 
----
+**Local run (`llama3.1:8b` on GTX 1070):**
 
-## Tool relevance discrimination test
-
-The MCP server intentionally exposes a fifth tool — `get_flight_schedule()` —
-which looks up airline schedules between airports. This has nothing to do with
-property underwriting.
-
-```python
-@mcp.tool()
-def get_flight_schedule(origin: str, destination: str, date: str) -> dict:
-    """Returns available flight schedules between two airports on a given date.
-    Use this to look up flight times for travel planning."""
-    ...
-```
-
-**Result:** In every test run, the agent loaded all 5 tool schemas,
-read their docstrings, and called only the 4 relevant underwriting tools.
-`get_flight_schedule` was never called.
-
-This demonstrates that the LLM correctly discriminates between available
-and appropriate tools based on goal context — a key requirement for
-production agentic systems with large tool catalogues.
+The local path calls the MCP tools in code, then asks the model once for the
+decision under a JSON schema constraint. Typical wall-clock is well under a
+minute — most of it the single decision call, since the tool calls are
+deterministic and run concurrently with no model round-trips.
 
 ---
 
@@ -310,8 +342,8 @@ production agentic systems with large tool catalogues.
 |---|---|
 | Transport | Streamable HTTP (`/mcp` path) — production standard |
 | Protocol | JSON-RPC 2.0 — request / response / notification |
-| Primitives | Tools (all 5) + Resources (guidelines sections) |
-| Tool relevance | LLM ignores irrelevant `get_flight_schedule` tool |
+| Primitives | Tools (6 underwriting tools) + Resources (guidelines sections) |
+| Client-side connector | Agent loop runs in-process, so a localhost MCP server works |
 | Security | System prompt hardening against prompt injection |
 | Inspection | FastMCP Inspector compatible |
 
@@ -330,7 +362,35 @@ production agentic systems with large tool catalogues.
 - Returns street-level crime for a lat/lng over the last 3 months
 - Filters to property crime categories only: burglary, vehicle crime,
   theft, robbery, shoplifting, criminal damage/arson
-- Calibrated index: monthly average × 1.0, normalised 0–100
+- Reported as a multiple of the national average (~200 property crimes per
+  month within ~1 mile), which reads more plainly than a 0–100 index — the
+  index saturates at 100 for any urban postcode
+- Limitation: some forces (notably Greater Manchester) no longer publish to
+  data.police.uk. The API answers HTTP 200 with an empty list, which is
+  indistinguishable from a genuinely quiet area
+- Solution: quiet areas trigger a force-publication check; where the force
+  publishes nothing the tool returns `DATA_UNAVAILABLE` so the case refers
+  rather than passing as low risk
+
+**HM Land Registry Price Paid**
+- `https://landregistry.data.gov.uk/data/ppi/transaction-record.json`
+- Historic sale prices by postcode; no API key required
+- Used to sanity-check the sum insured at submission stage
+- Buildings cover is rebuild cost and excludes land, so a sum insured below
+  the sale price is normal — only ≥2.5x (overinsurance) or ≤0.25x
+  (underinsurance) is flagged
+- A postcode holds many properties at different values, so the check only
+  runs when a house number identifies the subject property
+
+**Companies House**
+- `https://api.company-information.service.gov.uk/advanced-search/companies`
+- Companies registered at an address; free, but requires an API key
+- Detects a residential property also used as a registered business address,
+  which affects occupancy risk
+- A registered office is an administrative address, not proof of trading —
+  treated as a question for the broker, not an automatic decline
+- Without `COMPANIES_HOUSE_API_KEY` the tool reports the check as not
+  performed rather than implying no businesses exist
 
 ---
 
@@ -350,20 +410,29 @@ This project demonstrates all four main agentic patterns:
 ## Key design decisions
 
 **Why MCP over direct function calling?**
-Tools are defined once in `risk_server.py` and shared across any MCP-compatible
+Tools are defined once in `risk_server_v4.py` and shared across any MCP-compatible
 host — Microsoft Agent Framework, LangChain, Claude Desktop, or any future
 framework — without code changes. Adding a new tool means updating the server
 only, not every consumer.
 
 **Why inline guidelines for local / RAG for cloud?**
-`qwen2.5:14b` on 8GB VRAM has a practical 32k context window. With inline
-guidelines (~2k tokens) the model reasons about the full ruleset without
-retrieval latency. GPT-4o with RAG uses semantic search to retrieve relevant
-guideline sections, reducing input tokens per call.
+`llama3.1:8b` on 8GB VRAM has a practical context window in the low tens of
+thousands of tokens. With inline guidelines (~2k tokens) the model reasons
+about the full ruleset without retrieval latency. `gpt-4.1` with RAG uses
+semantic search to retrieve relevant guideline sections, reducing input
+tokens per call.
+
+**Why does the local provider not use the agent loop?**
+`llama3.1:8b` handles a single constrained JSON response well, but drifts
+over a multi-turn tool-calling loop — it narrates instead of emitting the
+decision, and every run falls back to REFER. So the Ollama path calls the
+MCP tools deterministically in code, then asks the model once for the
+decision with `format="json"`. The Azure path keeps the real agent loop.
 
 **Why GlobalStandard deployment type?**
 Azure OpenAI GlobalStandard routes inference to any available global data
-centre, giving 450 TPM quota vs 50 TPM for Standard regional deployment.
+centre, giving far higher throughput quota than a Standard regional
+deployment.
 For a portfolio project without data residency constraints this is the
 practical choice.
 
@@ -371,15 +440,21 @@ practical choice.
 
 ## Infrastructure
 
-All Azure resources managed by Terraform (`infra/`):
+All Azure resources managed by Terraform (`infra/terraform/`), with a Bicep
+alternative in `infra/bicep/`:
 
 - `azurerm_resource_group` — UK South
-- `azurerm_cognitive_account` — Azure OpenAI (GPT-4o + text-embedding-3-small)
+- `azurerm_cognitive_account` — Azure OpenAI (`gpt-4.1` + `text-embedding-3-small`)
 - `azurerm_search_service` — AI Search (Free tier for development)
 - `azurerm_ai_foundry` — AI Foundry Hub
 - `azurerm_ai_foundry_project` — AI Foundry Project
-- `azurerm_storage_account` — required by Foundry Hub
+- `azurerm_storage_account` — required by Foundry Hub; also hosts the
+  decision queues (`uw-decisions-accept` / `-refer` / `-decline`)
 - `azurerm_key_vault` — required by Foundry Hub
+
+Queue writes use `DefaultAzureCredential`, which needs the **Storage Queue
+Data Contributor** role on the storage account. `Owner` alone is not
+sufficient — it grants management access, not data-plane access.
 
 ---
 
