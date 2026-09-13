@@ -234,6 +234,76 @@ PROPERTY_CRIME_CATEGORIES = {
 # Calibrated multiplier — see calibration notes above
 CRIME_INDEX_MULTIPLIER = 1.0
 
+# National baseline for property crimes per month within the ~1 mile radius
+# the police API returns. Derived with the same method as this tool: median
+# across 10 sampled postcodes (city centre / town / suburb / rural),
+# 2026-05 data. Used to express exposure as a multiple of the average,
+# which reads more plainly than a 0-100 index.
+NATIONAL_AVG_MONTHLY_PROPERTY_CRIMES = 200
+
+# Some forces (notably Greater Manchester) no longer supply data to
+# data.police.uk. The street-level API still answers HTTP 200 with an empty
+# list, which is indistinguishable from a genuinely quiet rural area — so a
+# crime count alone cannot tell them apart. Instead we ask which force
+# covers the point, then check whether that force published anything at all
+# that month. A false LOW would let a high-crime city centre through at
+# standard rates, so this matters.
+_FORCE_PUBLISHES_CACHE: dict[str, bool] = {}
+
+# Below this monthly average we verify the force actually publishes before
+# reporting a LOW band. Genuinely quiet areas pass the check and stay LOW.
+CRIME_QUIET_THRESHOLD = 20
+
+
+async def _locate_force(client, lat: float, lng: float) -> str | None:
+    """Which police force covers these coordinates."""
+    try:
+        resp = await client.get(
+            "https://data.police.uk/api/locate-neighbourhood",
+            params={"q": f"{lat},{lng}"},
+        )
+        if resp.status_code == 200:
+            return resp.json().get("force")
+    except httpx.HTTPError:
+        pass
+    return None
+
+
+async def _force_publishes(client, force: str) -> bool:
+    """
+    Whether this force supplies crime data at all.
+
+    Checks several recent months: the latest one or two are often not yet
+    published for ANY force, so a single empty month proves nothing. The
+    force counts as publishing if any checked month has data.
+    """
+    if force in _FORCE_PUBLISHES_CACHE:
+        return _FORCE_PUBLISHES_CACHE[force]
+
+    publishes = False
+    for months_back in range(2, 6):
+        date = datetime.now() - timedelta(days=30 * months_back)
+        try:
+            resp = await client.get(
+                "https://data.police.uk/api/crimes-no-location",
+                params={
+                    "category": "all-crime",
+                    "force": force,
+                    "date": date.strftime("%Y-%m"),
+                },
+            )
+            if resp.status_code == 200 and len(resp.json()) > 0:
+                publishes = True
+                break
+        except httpx.HTTPError:
+            # Network trouble is not evidence of non-publication; assume it
+            # publishes so a transient failure cannot mark a real area LOW.
+            publishes = True
+            break
+
+    _FORCE_PUBLISHES_CACHE[force] = publishes
+    return publishes
+
 
 @mcp.tool()
 async def get_crime_index(postcode: str) -> dict:
@@ -251,7 +321,12 @@ async def get_crime_index(postcode: str) -> dict:
     Only counts property-relevant categories: burglary, vehicle crime,
     theft, robbery, shoplifting, criminal damage/arson.
 
-    Calibration: monthly average × 1.0, capped at 100.
+    Calibration: monthly average × 1.0, capped at 100. The index saturates
+    for any urban area, so prefer vs_national_average and crime_summary when
+    explaining the result to a person — the index only drives the band.
+
+    Returns crime_band "DATA_UNAVAILABLE" when the covering force does not
+    publish street-level data; treat that as a referral, not as low risk.
     """
     postcode_clean = postcode.strip().upper()
 
@@ -302,6 +377,40 @@ async def get_crime_index(postcode: str) -> dict:
     monthly_avg = total_property_crimes / months_fetched
     index = round(min(monthly_avg * CRIME_INDEX_MULTIPLIER, 100), 1)
 
+    # Distinguish "no data published" from "no crime here". A force that has
+    # withdrawn from the feed can still leak a handful of records, so check
+    # publication whenever the area looks quiet rather than only at exactly
+    # zero. Results are cached per force.
+    force, publishes = None, True
+    if monthly_avg < CRIME_QUIET_THRESHOLD:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            force = await _locate_force(client, lat, lng)
+            if force:
+                publishes = await _force_publishes(client, force)
+
+    if not publishes:
+        return {
+            "postcode": postcode_clean,
+            "latitude": lat,
+            "longitude": lng,
+            "crime_index": None,
+            "crime_band": "DATA_UNAVAILABLE",
+            "data_available": False,
+            "police_force": force,
+            "all_crimes_total": total_all_crimes,
+            "months_analysed": months_fetched,
+            "note": (
+                f"The police force covering this postcode ({force}) does not publish "
+                "street-level crime data. Crime exposure could not be "
+                "assessed — refer for manual review rather than assuming "
+                "low risk."
+            ),
+            "data_source": "data.police.uk street-level crime API",
+            "errors": errors if errors else None,
+        }
+
+    vs_national = round(monthly_avg / NATIONAL_AVG_MONTHLY_PROPERTY_CRIMES, 1)
+
     if index < 30:
         band = "LOW"
     elif index < 60:
@@ -317,6 +426,13 @@ async def get_crime_index(postcode: str) -> dict:
         "longitude": lng,
         "crime_index": index,
         "crime_band": band,
+        "data_available": True,
+        "vs_national_average": vs_national,
+        "national_avg_monthly_property_crimes": NATIONAL_AVG_MONTHLY_PROPERTY_CRIMES,
+        "crime_summary": (
+            f"{round(monthly_avg)} property crimes per month within ~1 mile — "
+            f"about {vs_national}x the national average"
+        ),
         "property_crimes_total": total_property_crimes,
         "all_crimes_total": total_all_crimes,
         "months_analysed": months_fetched,
