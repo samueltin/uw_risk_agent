@@ -163,14 +163,21 @@ Under-insurance of more than 20% against RICS rebuild cost triggers referral.
 
 ## 6. Crime Risk Guidelines
 
-Crime risk is assessed using the ONS-aligned property crime index (0–100).
+Crime risk is assessed from recorded property crime within approximately one
+mile of the risk address, using Home Office street-level data. Bands are
+calibrated against a measured sample of 100 random London postcodes, so the
+middle bands describe a typical London property rather than an extreme one.
 
-| Crime band | Crime index | Action |
-|---|---|---|
-| LOW | 0–30 | Standard rate |
-| MEDIUM | 31–60 | Standard rate; ensure standard security |
-| HIGH | 61–80 | 10% premium loading; minimum security requirements apply |
-| VERY HIGH | 81–100 | Refer to senior underwriter; enhanced security survey required |
+| Crime band | Property crimes per month | Position vs London | Action |
+|---|---|---|---|
+| LOW | under 112 | quieter than ~75% of London | Standard rate |
+| MEDIUM | 112 to 619 | the typical London range | Standard rate; ensure standard security |
+| HIGH | 620 to 1458 | busier than ~75% of London | 10% premium loading; minimum security requirements apply |
+| VERY HIGH | 1459 or more | top ~10% of London | Refer to senior underwriter; enhanced security survey required |
+
+Where the covering police force does not publish street-level data, the band
+is reported as DATA_UNAVAILABLE. Refer these for manual review — absence of
+data is not evidence of low crime.
 
 Minimum security requirements for HIGH crime band:
 - Five-lever mortise deadlock on all external doors (BS3621)

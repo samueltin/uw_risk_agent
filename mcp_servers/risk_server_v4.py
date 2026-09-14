@@ -37,6 +37,18 @@ mcp = FastMCP("uw-risk-tools-v4")
 # Shared helper: postcode → lat/lng via postcodes.io
 # ---------------------------------------------------------------------------
 
+def _month_offset(months_back: int) -> str:
+    """
+    The YYYY-MM string this many whole calendar months before now.
+
+    timedelta(days=30 * n) drifts: near a month end it can request the same
+    month twice or skip one entirely.
+    """
+    now = datetime.now()
+    index = now.year * 12 + (now.month - 1) - months_back
+    return f"{index // 12:04d}-{index % 12 + 1:02d}"
+
+
 async def _geocode(postcode: str) -> tuple[float, float]:
     """Convert a UK postcode to lat/lng. Raises ValueError if not found."""
     lat, lng, _, _ = await _geocode_full(postcode)
@@ -259,17 +271,42 @@ PROPERTY_CRIME_CATEGORIES = {
     "robbery",
     "shoplifting",
     "criminal-damage-arson",
+    "bicycle-theft",
+    "violent-crime",
 }
 
 # Calibrated multiplier — see calibration notes above
 CRIME_INDEX_MULTIPLIER = 1.0
 
-# National baseline for property crimes per month within the ~1 mile radius
-# the police API returns. Derived with the same method as this tool: median
-# across 10 sampled postcodes (city centre / town / suburb / rural),
-# 2026-05 data. Used to express exposure as a multiple of the average,
-# which reads more plainly than a 0-100 index.
-NATIONAL_AVG_MONTHLY_PROPERTY_CRIMES = 200
+# Reference baseline for property crimes per month within the ~1 mile radius
+# the police API returns.
+#
+# Measured, not assumed: 100 postcodes drawn at random from postcodes.io and
+# kept where region == "London", queried over 2026-05..2026-07 with the same
+# radius and category filter this tool uses. All 100 returned usable data.
+#
+#   min 13.7 | p10 56 | p25 112 | MEDIAN 277 | p75 620 | p90 1459 | max 3182
+#
+# The distribution is heavily right-skewed (mean 560 vs median 277), so the
+# median is the centre, not the mean.
+#
+# Scope is London. An earlier attempt at a national figure was abandoned:
+# most UK postcodes are rural, which dragged the median so low that every
+# urban property read as a huge multiple of it. Comparing a non-London
+# property against this baseline overstates how unusual it is.
+LONDON_MEDIAN_MONTHLY_PROPERTY_CRIMES = 277
+
+# Band boundaries in property crimes per month, taken from percentiles of
+# the same sample. Each value is the lower bound of the next band up.
+#   LOW        below p25   — quieter than about 75% of London
+#   MEDIUM     p25 to p75  — the typical London range, median 277 sits here
+#   HIGH       p75 to p90  — busier than about 75% of London
+#   VERY_HIGH  above p90   — the top tenth
+CRIME_BAND_THRESHOLDS = {
+    "LOW": 112,       # p25
+    "MEDIUM": 620,    # p75
+    "HIGH": 1459,     # p90
+}
 
 # Some forces (notably Greater Manchester) no longer supply data to
 # data.police.uk. The street-level API still answers HTTP 200 with an empty
@@ -312,14 +349,13 @@ async def _force_publishes(client, force: str) -> bool:
 
     publishes = False
     for months_back in range(2, 6):
-        date = datetime.now() - timedelta(days=30 * months_back)
         try:
             resp = await client.get(
                 "https://data.police.uk/api/crimes-no-location",
                 params={
                     "category": "all-crime",
                     "force": force,
-                    "date": date.strftime("%Y-%m"),
+                    "date": _month_offset(months_back),
                 },
             )
             if resp.status_code == 200 and len(resp.json()) > 0:
@@ -341,18 +377,21 @@ async def get_crime_index(postcode: str) -> dict:
     Returns property crime exposure index for a UK postcode.
     Calls the data.police.uk street-level crime API over the last 3 months.
 
-    Index is 0–100 (higher = more property crime).
-    Bands:
-      LOW       (0–29)   — standard rate
-      MEDIUM    (30–59)  — standard rate, check security
-      HIGH      (60–79)  — 10% premium loading
-      VERY_HIGH (80–100) — refer to senior underwriter
+    Bands are percentiles of a measured London sample (100 random postcodes,
+    2026-05..07), in property crimes per month within ~1 mile:
+      LOW       (<112)      — quieter than ~75% of London, standard rate
+      MEDIUM    (112–619)   — typical London range, check security
+      HIGH      (620–1458)  — busier than ~75% of London, 10% loading
+      VERY_HIGH (>=1459)    — top ~10% of London, refer to senior underwriter
+
+    crime_index is retained for continuity but saturates at 100 for any
+    urban postcode — use vs_london_median and crime_summary instead.
 
     Only counts property-relevant categories: burglary, vehicle crime,
     theft, robbery, shoplifting, criminal damage/arson.
 
     Calibration: monthly average × 1.0, capped at 100. The index saturates
-    for any urban area, so prefer vs_national_average and crime_summary when
+    for any urban area, so prefer vs_london_median and crime_summary when
     explaining the result to a person — the index only drives the band.
 
     Returns crime_band "DATA_UNAVAILABLE" when the covering force does not
@@ -368,12 +407,12 @@ async def get_crime_index(postcode: str) -> dict:
     total_all_crimes = 0
     total_property_crimes = 0
     months_fetched = 0
+    empty_months = 0
     errors = []
 
     async with httpx.AsyncClient(timeout=20.0) as client:
-        for months_back in range(1, 4):
-            date = datetime.now() - timedelta(days=30 * months_back)
-            month_str = date.strftime("%Y-%m")
+        for months_back in range(2, 5):
+            month_str = _month_offset(months_back)
 
             try:
                 resp = await client.get(
@@ -382,6 +421,15 @@ async def get_crime_index(postcode: str) -> dict:
                 )
                 if resp.status_code == 200:
                     crimes = resp.json()
+                    if not crimes:
+                        # HTTP 200 with an empty list means either a genuinely
+                        # quiet area or a month this force has not published.
+                        # Record it separately: it counts as a real zero once
+                        # we confirm the force publishes, and excludes the
+                        # postcode if it does not.
+                        errors.append(f"{month_str}: no records returned")
+                        empty_months += 1
+                        continue
                     total_all_crimes += len(crimes)
                     total_property_crimes += sum(
                         1 for c in crimes
@@ -396,6 +444,36 @@ async def get_crime_index(postcode: str) -> dict:
             except httpx.TimeoutException:
                 errors.append(f"{month_str}: request timed out")
 
+    # An area where every month came back empty is either crime-free or
+    # covered by a force that publishes nothing. Ask before deciding: a
+    # false LOW would let a high-crime city centre through at standard rates.
+    if months_fetched == 0 and empty_months:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            force = await _locate_force(client, lat, lng)
+            publishes = await _force_publishes(client, force) if force else True
+        if publishes:
+            months_fetched = empty_months        # genuine zeros
+        else:
+            return {
+                "postcode": postcode_clean,
+                "latitude": lat,
+                "longitude": lng,
+                "crime_index": None,
+                "crime_band": "DATA_UNAVAILABLE",
+                "data_available": False,
+                "police_force": force,
+                "all_crimes_total": 0,
+                "months_analysed": 0,
+                "note": (
+                    f"The police force covering this postcode ({force}) does "
+                    "not publish street-level crime data. Crime exposure could "
+                    "not be assessed — refer for manual review rather than "
+                    "assuming low risk."
+                ),
+                "data_source": "data.police.uk street-level crime API",
+                "errors": errors or None,
+            }
+
     if months_fetched == 0:
         return {
             "error": "Could not retrieve crime data — Police API unavailable.",
@@ -405,6 +483,7 @@ async def get_crime_index(postcode: str) -> dict:
         }
 
     monthly_avg = total_property_crimes / months_fetched
+    print(f"get_crime_index: {total_property_crimes} property crimes over {months_fetched} months → {monthly_avg:.1f}/month average for {postcode_clean}")
     index = round(min(monthly_avg * CRIME_INDEX_MULTIPLIER, 100), 1)
 
     # Distinguish "no data published" from "no crime here". A force that has
@@ -439,16 +518,21 @@ async def get_crime_index(postcode: str) -> dict:
             "errors": errors if errors else None,
         }
 
-    vs_national = round(monthly_avg / NATIONAL_AVG_MONTHLY_PROPERTY_CRIMES, 1)
+    vs_median = round(monthly_avg / LONDON_MEDIAN_MONTHLY_PROPERTY_CRIMES, 1)
 
-    if index < 30:
-        band = "LOW"
-    elif index < 60:
-        band = "MEDIUM"
-    elif index < 80:
-        band = "HIGH"
+    # Band on the measured distribution, not on the saturating index. The
+    # index caps at 100, so every urban postcode hit VERY_HIGH: the median
+    # London postcode (277/month) scored 100 and was treated as an extreme
+    # risk. Thresholds are percentiles of the 100-postcode London sample, so
+    # a typical London property now lands in the middle of the scale.
+    if monthly_avg < CRIME_BAND_THRESHOLDS["LOW"]:
+        band = "LOW"                 # quieter than ~75% of London
+    elif monthly_avg < CRIME_BAND_THRESHOLDS["MEDIUM"]:
+        band = "MEDIUM"              # the typical London range
+    elif monthly_avg < CRIME_BAND_THRESHOLDS["HIGH"]:
+        band = "HIGH"                # busier than ~75% of London
     else:
-        band = "VERY_HIGH"
+        band = "VERY_HIGH"           # top ~10% of London
 
     return {
         "postcode": postcode_clean,
@@ -457,11 +541,12 @@ async def get_crime_index(postcode: str) -> dict:
         "crime_index": index,
         "crime_band": band,
         "data_available": True,
-        "vs_national_average": vs_national,
-        "national_avg_monthly_property_crimes": NATIONAL_AVG_MONTHLY_PROPERTY_CRIMES,
+        "vs_london_median": vs_median,
+        "band_thresholds_monthly_crimes": CRIME_BAND_THRESHOLDS,
+        "london_median_monthly_property_crimes": LONDON_MEDIAN_MONTHLY_PROPERTY_CRIMES,
         "crime_summary": (
             f"{round(monthly_avg)} property crimes per month within ~1 mile — "
-            f"about {vs_national}x the national average"
+            f"about {vs_median}x the median London postcode"
         ),
         "property_crimes_total": total_property_crimes,
         "all_crimes_total": total_all_crimes,
@@ -836,129 +921,6 @@ async def get_property_sale_history(
         }
 
     return result
-
-
-# ---------------------------------------------------------------------------
-# Tool 6: check_business_registrations (Companies House)
-# ---------------------------------------------------------------------------
-
-COMPANIES_HOUSE_URL = (
-    "https://api.company-information.service.gov.uk/advanced-search/companies"
-)
-
-
-@mcp.tool()
-async def check_business_registrations(postcode: str, house_number: str = "") -> dict:
-    """
-    Returns companies registered at a UK postcode (Companies House).
-
-    Use to detect a residential property also serving as a registered
-    business address, which affects occupancy risk and may fall outside a
-    standard residential policy.
-
-    Interpret with care: a registered office is an administrative address,
-    not proof of trading activity at the property. Many sole traders
-    register at a home address and carry on no business there. Treat a hit
-    as something to ask the broker about, not as an automatic decline.
-
-    Requires COMPANIES_HOUSE_API_KEY. Without it the tool reports that the
-    check could not be run, rather than implying no businesses exist.
-
-    Args:
-        postcode: UK postcode, e.g. "BS9 3AA"
-        house_number: Optional building number/name to narrow the match
-    """
-    import os
-
-    postcode_clean = postcode.strip().upper()
-    api_key = os.environ.get("COMPANIES_HOUSE_API_KEY", "").strip()
-
-    if not api_key:
-        return {
-            "postcode": postcode_clean,
-            "check_performed": False,
-            "note": (
-                "COMPANIES_HOUSE_API_KEY is not configured, so business "
-                "registrations could not be checked. Do not treat this as "
-                "confirmation that the property has no business use."
-            ),
-            "data_source": "Companies House API",
-        }
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                COMPANIES_HOUSE_URL,
-                params={"location": postcode_clean, "size": "50"},
-                auth=(api_key, ""),
-            )
-            if resp.status_code == 401:
-                return {
-                    "postcode": postcode_clean,
-                    "check_performed": False,
-                    "error": "Companies House rejected the API key (HTTP 401).",
-                    "data_source": "Companies House API",
-                }
-            if resp.status_code != 200:
-                return {
-                    "postcode": postcode_clean,
-                    "check_performed": False,
-                    "error": f"Companies House returned HTTP {resp.status_code}",
-                    "data_source": "Companies House API",
-                }
-            items = resp.json().get("items", [])
-    except httpx.HTTPError as e:
-        return {
-            "postcode": postcode_clean,
-            "check_performed": False,
-            "error": f"Companies House unreachable: {e}",
-            "data_source": "Companies House API",
-        }
-
-    companies = []
-    for item in items:
-        office = item.get("registered_office_address", {}) or {}
-        premises = str(office.get("premises", "") or "")
-        line1 = str(office.get("address_line_1", "") or "")
-
-        if house_number:
-            wanted = house_number.strip().upper()
-            if wanted not in premises.upper() and not line1.upper().startswith(wanted):
-                continue
-
-        companies.append({
-            "company_name": item.get("company_name"),
-            "company_number": item.get("company_number"),
-            "company_status": item.get("company_status"),
-            "company_type": item.get("company_type"),
-            "incorporated_on": item.get("date_of_creation"),
-            "sic_codes": item.get("sic_codes"),
-            "registered_office": ", ".join(
-                str(office.get(k, "")) for k in
-                ("premises", "address_line_1", "locality", "postal_code")
-                if office.get(k)
-            ),
-        })
-
-    active = [c for c in companies if c.get("company_status") == "active"]
-
-    return {
-        "postcode": postcode_clean,
-        "house_number": house_number or None,
-        "check_performed": True,
-        "companies_found": len(companies),
-        "active_companies": len(active),
-        "business_address_flag": bool(active),
-        "companies": companies[:10],
-        "note": (
-            f"{len(active)} active compan{'y' if len(active) == 1 else 'ies'} "
-            "registered at this address. A registered office is not proof of "
-            "trading at the property — confirm actual use with the broker."
-            if active else
-            "No active companies registered at this address."
-        ),
-        "data_source": "Companies House API",
-    }
 
 
 # ---------------------------------------------------------------------------

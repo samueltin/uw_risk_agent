@@ -104,7 +104,6 @@ class FindingsResponse(BaseModel):
     crime: dict = Field(default_factory=dict)
     claims: dict = Field(default_factory=dict)
     sale_history: dict = Field(default_factory=dict)
-    business: dict = Field(default_factory=dict)
     validation: dict = Field(default_factory=dict)
 
 

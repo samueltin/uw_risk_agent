@@ -265,9 +265,9 @@ def render_findings(findings: dict) -> None:
             st.metric("Crime exposure", "No data")
             st.caption(crime.get("note", "The covering police force publishes no data."))
         else:
-            ratio = crime.get("vs_national_average")
+            ratio = crime.get("vs_london_median")
             st.metric(
-                "Vs national average",
+                "Vs median London postcode",
                 f"{ratio}x" if ratio is not None else "Unknown",
             )
             if crime.get("crime_summary"):
@@ -290,9 +290,7 @@ def render_findings(findings: dict) -> None:
             )
 
     sale_history = findings.get("sale_history") or {}
-    business = findings.get("business") or {}
-
-    col_value, col_business = st.columns(2)
+    col_value, _ = st.columns(2)
 
     with col_value:
         st.markdown("**Sum insured vs sale history**")
@@ -321,15 +319,6 @@ def render_findings(findings: dict) -> None:
             )
             if check.get("note"):
                 st.caption(check["note"])
-
-    with col_business:
-        st.markdown("**Business registrations**")
-        if not business.get("check_performed"):
-            st.metric("Companies at address", "Not checked")
-            st.caption(business.get("error") or business.get("note", ""))
-        else:
-            st.metric("Active companies", business.get("active_companies", 0))
-            st.caption(business.get("note", ""))
 
     flags = validation.get("flags") or []
     if flags or validation.get("summary"):

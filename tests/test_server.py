@@ -8,17 +8,17 @@ async def main():
         tools = await client.list_tools()
         print("Tools:", [t.name for t in tools])
 
-        # Test flood zone — Bristol high-risk postcode
-        result = await client.call_tool("get_flood_zone", {"postcode": "TW1 3DY"})
-        print("\nFlood zone (TW1 3DY):", result)
+        # # Test flood zone — Bristol high-risk postcode
+        # result = await client.call_tool("get_flood_zone", {"postcode": "TW1 3DY"})
+        # print("\nFlood zone (TW1 3DY):", result)
 
         # # Test low-risk postcode
         # result = await client.call_tool("get_flood_zone", {"postcode": "TW3 3PB"})
         # print("Flood zone (TW3 3PB):", result)
 
-        # # Test high crime index
-        # result = await client.call_tool("get_crime_index", {"postcode": "BS1 4DJ"})
-        # print("\nCrime index:", result)
+        # Test high crime index
+        result = await client.call_tool("get_crime_index", {"postcode": "TW2 6EN"})
+        print("\nCrime index:", result)
 
 
         # # Test low crime index

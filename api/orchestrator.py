@@ -133,8 +133,6 @@ Tools available:
   - get_claims_history(applicant_name, date_of_birth): verify prior claims
   - get_property_sale_history(postcode, house_number, sum_insured): Land
       Registry sale prices, with a sum-insured plausibility check
-  - check_business_registrations(postcode, house_number): companies
-      registered at the address
   - search_uw_guidelines(query): search the underwriting guidelines knowledge base
 
 Reading the tool results:
@@ -146,13 +144,9 @@ Reading the tool results:
     below the last sale price is normal. Act only on the tool's own
     verdict (POSSIBLE_OVERINSURANCE / POSSIBLE_UNDERINSURANCE), and note
     that sale prices are historic and not inflation-adjusted.
-  - A registered office is an administrative address, not proof of trading
-    at the property. Treat a company hit as a question for the broker
-    about occupancy, not as an automatic decline.
   - If a tool reports that data was unavailable (for example crime_band
-    DATA_UNAVAILABLE, flood_risk_band Unassessed, or check_performed
-    false), treat the risk as UNASSESSED and refer. Never read missing
-    data as a low-risk result.
+    DATA_UNAVAILABLE or flood_risk_band Unassessed), treat the risk as
+    UNASSESSED and refer. Never read missing data as a low-risk result.
 
 Decision criteria (apply judgement — these are guides, not rigid rules):
   ACCEPT:  No referral triggers. Risk within appetite. No mandatory exclusions.
@@ -328,13 +322,6 @@ async def collect_findings(submission: UnderwritingSubmission) -> dict:
                 "sum_insured": submission.sum_insured,
             },
         ),
-        "business": (
-            "check_business_registrations",
-            {
-                "postcode": submission.property_postcode,
-                "house_number": _house_number(submission.property_address),
-            },
-        ),
         "validation": (
             "validate_submission",
             {"submission_json": submission.to_json()},
@@ -389,7 +376,6 @@ async def _collect_ollama_evidence(
         "get_crime_index": None,
         "get_claims_history": None,
         "get_property_sale_history": None,
-        "check_business_registrations": None,
     }
 
     async with MCPClient(mcp_url) as mcp:
@@ -417,14 +403,6 @@ async def _collect_ollama_evidence(
                 "postcode": submission.property_postcode,
                 "house_number": _house_number(submission.property_address),
                 "sum_insured": submission.sum_insured,
-            },
-        )
-        evidence["check_business_registrations"] = await _call_mcp_tool(
-            mcp,
-            "check_business_registrations",
-            {
-                "postcode": submission.property_postcode,
-                "house_number": _house_number(submission.property_address),
             },
         )
 
@@ -551,7 +529,6 @@ async def _run_assessment_async(
             "get_crime_index",
             "get_claims_history",
             "get_property_sale_history",
-            "check_business_registrations",
         ],
     )
 
