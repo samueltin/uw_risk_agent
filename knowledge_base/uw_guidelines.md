@@ -46,7 +46,7 @@ Referral required:
 - Non-standard wall materials (e.g. cob, adobe)
 
 Decline:
-- Timber frame construction combined with Zone 3a or Zone 3b flood risk
+- Timber frame construction combined with Medium or High flood risk
 - Properties where structural survey has identified active subsidence
 
 ### 2.3 Year of Construction
@@ -60,28 +60,36 @@ Decline:
 
 ## 3. Flood Risk Guidelines
 
-### 3.1 Environment Agency Flood Zone Classification
-All properties must be assessed against the Environment Agency flood zone map.
+### 3.1 Environment Agency Flood Risk Classification
+All properties must be assessed against the Environment Agency "Risk of
+Flooding from Rivers and Sea" (RoFRS) dataset, which reports one of four
+probability bands at the property's location. RoFRS accounts for existing
+flood defences.
 
-**Zone 1 (Low probability — <0.1% annual chance):**
+**Very Low (<1 in 1000 annual chance):**
 - Standard appetite
 - No premium loading required
 
-**Zone 2 (Medium probability — 0.1%–1% annual chance):**
+**Low (1 in 1000 to 1 in 100 annual chance):**
 - Within appetite
 - Apply 15% premium loading on buildings element
 - Flood excess: minimum £500
 
-**Zone 3a (High probability — >1% annual chance):**
+**Medium (1 in 100 to 1 in 30 annual chance):**
 - Refer to senior underwriter
 - If accepted: apply 35% premium loading on buildings element
 - Flood excess: minimum £2,500
 - Flood Re cession must be considered
 
-**Zone 3b (Functional floodplain):**
+**High (greater than 1 in 30 annual chance):**
 - Outside standard appetite
 - Decline unless Flood Re cession applies and property has flood resilience measures
 - If Flood Re applies: refer to Flood Re team for pricing
+
+**Unassessed (property outside the mapped dataset):**
+- Flood risk could not be established
+- Refer for manual review. An unassessed property must never be treated as
+  low risk — absence of data is not absence of risk
 
 ### 3.2 Flood Re Eligibility
 Flood Re is a government-backed reinsurance scheme for high flood-risk properties.
@@ -92,7 +100,7 @@ Properties eligible for Flood Re cession:
 - Council tax band A through G (Band H excluded)
 - Not a small business property
 
-If a Zone 3a or 3b property is Flood Re eligible, refer to the Flood Re team
+If a Medium or High risk property is Flood Re eligible, refer to the Flood Re team
 rather than declining outright. The Flood Re team will provide a cession price
 based on council tax band.
 
@@ -176,7 +184,7 @@ Minimum security requirements for HIGH crime band:
 Any of the following automatically requires referral to a senior underwriter:
 
 1. Timber frame construction (any flood zone)
-2. Zone 3a flood risk
+2. Medium flood risk band
 3. Surface water flood depth > 0.50m at 1-in-75 years
 4. 3 or more claims in the past 5 years
 5. Any subsidence claim in the past 5 years
@@ -194,8 +202,8 @@ Any of the following automatically requires referral to a senior underwriter:
 
 The following constitute grounds for automatic decline:
 
-1. Zone 3b flood risk (unless Flood Re cession applies)
-2. Timber frame construction AND Zone 3a or 3b flood risk
+1. High flood risk band (unless Flood Re cession applies)
+2. Timber frame construction AND Medium or High flood risk
 3. 4 or more claims in the past 5 years
 4. Two or more subsidence claims
 5. Property built before 1700
@@ -211,8 +219,8 @@ The following constitute grounds for automatic decline:
 
 | Risk factor | Loading |
 |---|---|
-| Zone 2 flood | +15% on buildings |
-| Zone 3a flood | +35% on buildings |
+| Low flood risk | +15% on buildings |
+| Medium flood risk | +35% on buildings |
 | Surface water 0.15–0.50m | +10% |
 | 2 claims in 5 years | +20% |
 | Timber frame (if accepted) | +25% |

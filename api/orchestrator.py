@@ -128,7 +128,7 @@ necessary. Keep calling tools until you have sufficient evidence.
 
 Tools available:
   - validate_submission(submission_json): check data completeness and flags
-  - get_flood_zone(postcode): flood risk and Flood Re eligibility
+  - get_flood_zone(postcode): EA RoFRS flood risk band and Flood Re eligibility
   - get_crime_index(postcode): property crime exposure
   - get_claims_history(applicant_name, date_of_birth): verify prior claims
   - get_property_sale_history(postcode, house_number, sum_insured): Land
@@ -138,6 +138,10 @@ Tools available:
   - search_uw_guidelines(query): search the underwriting guidelines knowledge base
 
 Reading the tool results:
+  - Flood risk uses EA RoFRS bands: High (>1 in 30 annual chance), Medium
+    (1 in 100 to 1 in 30), Low (1 in 1000 to 1 in 100), Very Low (<1 in
+    1000). These are not Flood Map for Planning zones — do not translate
+    them into Zone 1/2/3a/3b.
   - Buildings cover is REBUILD cost and excludes land, so a sum insured
     below the last sale price is normal. Act only on the tool's own
     verdict (POSSIBLE_OVERINSURANCE / POSSIBLE_UNDERINSURANCE), and note
@@ -146,16 +150,17 @@ Reading the tool results:
     at the property. Treat a company hit as a question for the broker
     about occupancy, not as an automatic decline.
   - If a tool reports that data was unavailable (for example crime_band
-    DATA_UNAVAILABLE, or check_performed false), treat the risk as
-    UNASSESSED and refer. Never read missing data as a low-risk result.
+    DATA_UNAVAILABLE, flood_risk_band Unassessed, or check_performed
+    false), treat the risk as UNASSESSED and refer. Never read missing
+    data as a low-risk result.
 
 Decision criteria (apply judgement — these are guides, not rigid rules):
   ACCEPT:  No referral triggers. Risk within appetite. No mandatory exclusions.
   REFER:   Any referral trigger present. Borderline flood/crime. Claims anomaly.
            Sum insured above £1,000,000. Uncertain or conflicting signals.
-  DECLINE: Risk clearly outside appetite. Examples: Zone 3b flood,
+  DECLINE: Risk clearly outside appetite. Examples: High flood risk band,
            3+ claims in 5 years, mandatory exclusion applies,
-           timber pre-1920 construction + Zone 3a/3b flood.
+           timber pre-1920 construction + Medium or High flood risk.
 
 When you are confident in your decision, return ONLY a JSON object:
 {
@@ -184,7 +189,7 @@ def search_uw_guidelines(query: str) -> str:
 
     Args:
         query: Natural-language description of the guideline to look up,
-            e.g. "flood zone 3a appetite" or "timber frame construction".
+            e.g. "medium flood risk appetite" or "timber frame construction".
 
     Returns:
         The most relevant guideline passages, or a notice if unavailable.
@@ -453,9 +458,12 @@ def _build_ollama_decision_prompt(
         "ACCEPT: no referral triggers, risk within appetite, no mandatory exclusions.\n"
         "REFER: any referral trigger, borderline flood/crime, claims anomaly, "
         "sum insured above £1,000,000, uncertain or conflicting signals.\n"
-        "DECLINE: clearly outside appetite, including Zone 3b flood, 3+ claims "
-        "in 5 years, mandatory exclusion, or timber pre-1920 construction plus "
-        "Zone 3a/3b flood.\n\n"
+        "DECLINE: clearly outside appetite, including High flood risk band, "
+        "3+ claims in 5 years, mandatory exclusion, or timber pre-1920 "
+        "construction plus Medium or High flood risk.\n\n"
+        "Flood risk uses EA RoFRS bands (High / Medium / Low / Very Low), not "
+        "Flood Map for Planning zones. A flood_risk_band of 'Unassessed' means "
+        "the risk is unknown: refer, never treat it as low risk.\n\n"
         f"Required JSON shape:\n{json.dumps(schema, indent=2)}\n\n"
         f"Submission JSON:\n{submission.to_json()}\n\n"
         f"Tool evidence JSON:\n{json.dumps(evidence, indent=2)}\n\n"

@@ -1,5 +1,5 @@
 """
-Risk Tools MCP Server v3
+Risk Tools MCP Server v4
 ------------------------
 Changes from v2:
   1. get_crime_index: multiplier recalibrated from * 5 to * 1.0
@@ -22,7 +22,7 @@ Dependencies:
     pip install fastmcp httpx
 
 Run locally:
-    python mcp_servers/risk_server_v3.py
+    python mcp_servers/risk_server_v4.py
 """
 
 import json
@@ -30,7 +30,7 @@ import httpx
 from datetime import datetime, timedelta
 from fastmcp import FastMCP
 
-mcp = FastMCP("uw-risk-tools-v3")
+mcp = FastMCP("uw-risk-tools-v4")
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +39,17 @@ mcp = FastMCP("uw-risk-tools-v3")
 
 async def _geocode(postcode: str) -> tuple[float, float]:
     """Convert a UK postcode to lat/lng. Raises ValueError if not found."""
+    lat, lng, _, _ = await _geocode_full(postcode)
+    return lat, lng
+
+
+async def _geocode_full(postcode: str) -> tuple[float, float, float | None, float | None]:
+    """
+    Convert a UK postcode to (lat, lng, easting, northing).
+
+    postcodes.io returns British National Grid coordinates alongside WGS84,
+    which is what the RoFRS shapefile uses — so no reprojection is needed.
+    """
     clean = postcode.strip().upper().replace(" ", "")
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(f"https://api.postcodes.io/postcodes/{clean}")
@@ -50,60 +61,43 @@ async def _geocode(postcode: str) -> tuple[float, float]:
     result = resp.json().get("result")
     if not result:
         raise ValueError(f"No geocode result for postcode '{postcode}'.")
-    return float(result["latitude"]), float(result["longitude"])
+
+    easting = result.get("eastings")
+    northing = result.get("northings")
+    return (
+        float(result["latitude"]),
+        float(result["longitude"]),
+        float(easting) if easting is not None else None,
+        float(northing) if northing is not None else None,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Static flood zone fallback
-# Source: EA Flood Map for Planning (manually curated from planning data)
-# Keyed on outward code (e.g. "TW1", "BS1") — covers England only.
-# EA live warnings take priority if active; this is the dry-weather baseline.
+# Flood risk baseline: EA Risk of Flooding from Rivers and Sea (RoFRS)
+#
+# Replaces the previous hardcoded postcode -> flood zone table. That table
+# keyed on outward code, which cannot express flood risk: TW1 3DY (Eel Pie
+# Island, in the Thames) is High while TW1 3NP 150m away is Very Low, yet
+# both shared one entry. Cross-checking it against RoFRS also found five
+# London districts marked Zone 3a whose every sampled postcode falls outside
+# any flood polygon.
+#
+# RoFRS bands are the EA's own classification and account for flood
+# defences, unlike Flood Map for Planning zones:
+#   High      >1 in 30 annual chance
+#   Medium    1 in 100 to 1 in 30
+#   Low       1 in 1000 to 1 in 100
+#   Very Low  <1 in 1000
+#
+# Coverage is Greater London. Outside it the tool reports the risk as
+# unassessed rather than guessing low.
 # ---------------------------------------------------------------------------
 
-STATIC_FLOOD_ZONES = {
-    # Thames floodplain (Surrey/Richmond/Twickenham)
-    "TW1":  "Zone 3a", "TW2":  "Zone 3a", "TW9":  "Zone 3a",
-    "TW10": "Zone 3a", "TW11": "Zone 3a", "TW12": "Zone 3a",
-    "KT1":  "Zone 3a", "KT2":  "Zone 3a",
-    # Thames (Central London)
-    "SE1":  "Zone 3a", "SW1A": "Zone 2",  "EC4":  "Zone 3a",
-    # Bristol
-    "BS1":  "Zone 3a", "BS2":  "Zone 3a",
-    # York city centre (River Ouse)
-    "YO1":  "Zone 3b", "YO30": "Zone 3a",
-    # Somerset Levels
-    "TA10": "Zone 3b", "TA12": "Zone 3b",
-    # Exeter (River Exe)
-    "EX2":  "Zone 2",  "EX3":  "Zone 3a",
-    # Gloucester (River Severn)
-    "GL1":  "Zone 3a", "GL2":  "Zone 3a",
-    # Shrewsbury (River Severn)
-    "SY1":  "Zone 3a",
-    # Hull (tidal/coastal)
-    "HU1":  "Zone 3a", "HU2":  "Zone 3a",
-    # Doncaster (River Don)
-    "DN1":  "Zone 3a",
-    # Leeds (River Aire)
-    "LS1":  "Zone 2",  "LS10": "Zone 3a",
-    # Carlisle (River Eden)
-    "CA1":  "Zone 3a",
-}
+from rofrs import band_at, in_coverage, BAND_SEVERITY
 
-
-def _static_flood_zone(postcode: str) -> str | None:
-    """
-    Return EA planning flood zone for known high-risk postcode districts.
-    Tries the full outward code first (e.g. 'TW10'), then 3-char, then 2-char.
-    Returns None if the postcode is not in the static table (assume Zone 1).
-    """
-    outward = postcode.strip().upper().split()[0] if " " in postcode else postcode.strip().upper()[:4]
-
-    # Try progressively shorter prefixes: TW10 → TW1 → TW
-    for length in [4, 3, 2]:
-        zone = STATIC_FLOOD_ZONES.get(outward[:length])
-        if zone:
-            return zone
-    return None
+# Live EA warning severity -> the RoFRS band it implies. A warning only ever
+# raises the assessed risk; it never lowers the mapped baseline.
+EA_SEVERITY_TO_BAND = {1: "High", 2: "High", 3: "Medium"}
 
 
 # ---------------------------------------------------------------------------
@@ -118,33 +112,43 @@ async def get_flood_zone(postcode: str) -> dict:
     Returns flood risk data for a UK property postcode.
 
     Uses a two-layer approach:
-      Layer 1 (static): EA Flood Map for Planning zone designations for
-        known high-risk postcode districts. Gives realistic results
-        year-round regardless of current weather.
+      Layer 1 (mapped): EA Risk of Flooding from Rivers and Sea (RoFRS)
+        polygons, looked up at the property's own grid reference. Gives
+        realistic results year-round regardless of current weather.
       Layer 2 (live): Environment Agency real-time flood warnings API.
-        Overrides upward if an active warning exists near the property.
+        Raises the assessed risk if an active warning exists nearby.
 
-    Flood zones (England only — EA classification):
-      Zone 1  = Low probability    (<0.1% annual chance)
-      Zone 2  = Medium probability (0.1–1% annual chance)
-      Zone 3a = High probability   (>1% annual chance) — refer required
-      Zone 3b = Functional floodplain — decline unless Flood Re applies
+    Risk bands (EA RoFRS classification):
+      High      >1 in 30 annual chance    — decline territory, see guidelines
+      Medium    1 in 100 to 1 in 30       — refer
+      Low       1 in 1000 to 1 in 100     — acceptable, loading applies
+      Very Low  <1 in 1000                — standard terms
 
-    Coverage: England only. For Scotland use SEPA, Wales use NRW,
-    Northern Ireland use DfI Rivers.
+    RoFRS accounts for flood defences, unlike Flood Map for Planning zones.
+
+    flood_risk_band is "Unassessed" where the property lies outside the
+    mapped dataset. Treat that as a referral, never as low risk.
+
+    Coverage: the bundled RoFRS extract is Greater London. Scotland uses
+    SEPA, Wales NRW, Northern Ireland DfI Rivers.
     """
     postcode_clean = postcode.strip().upper()
-
     try:
-        lat, lng = await _geocode(postcode_clean)
+        lat, lng, easting, northing = await _geocode_full(postcode_clean)
     except ValueError as e:
         return {"error": str(e), "postcode": postcode_clean}
 
-    # Layer 1: static planning zone
-    static_zone = _static_flood_zone(postcode_clean)
+    # Layer 1: mapped RoFRS band at this property's grid reference
+    mapped_band = None
+    mapped = False
+    if easting is not None and northing is not None and in_coverage(easting, northing):
+        mapped = True
+        # None inside coverage means no flood polygon here, i.e. negligible.
+        mapped_band = band_at(easting, northing) or "Very Low"
+
 
     # Layer 2: EA live warnings
-    ea_zone = None
+    ea_band = None
     active_warnings = 0
     warning_descriptions = []
     severity_level = None
@@ -169,44 +173,70 @@ async def get_flood_zone(postcode: str) -> dict:
                     if severity_level is None or level < severity_level:
                         severity_level = level
 
-            zone_map = {1: "Zone 3b", 2: "Zone 3a", 3: "Zone 2"}
-            ea_zone = zone_map.get(severity_level)
+            ea_band = EA_SEVERITY_TO_BAND.get(severity_level)
 
     except httpx.RequestError:
         pass  # EA API unavailable — fall through to static layer
 
-    # Resolve final zone:
-    # EA live warning takes priority (can only upgrade risk, not downgrade)
-    # Static planning zone is the dry-weather baseline
-    # Default to Zone 1 if neither layer has data
-    zone_priority = {"Zone 3b": 4, "Zone 3a": 3, "Zone 2": 2, "Zone 1": 1}
-    candidates = [z for z in [ea_zone, static_zone] if z]
+    # Resolve the final band. A live warning can only raise the assessed
+    # risk, never lower the mapped baseline. Outside the mapped extent the
+    # answer is "Unassessed": a property we have no data for must refer, not
+    # pass as low risk.
+    candidates = [b for b in (ea_band, mapped_band) if b]
     if candidates:
-        flood_zone = max(candidates, key=lambda z: zone_priority.get(z, 0))
+        flood_risk_band = max(candidates, key=lambda b: BAND_SEVERITY.get(b, 0))
+    elif mapped:
+        flood_risk_band = "Very Low"
     else:
-        flood_zone = "Zone 1"
+        flood_risk_band = "Unassessed"
 
-    flood_re_eligible = flood_zone in ("Zone 3a", "Zone 3b")
-    source = "EA Flood Map for Planning (static)"
-    if ea_zone and zone_priority.get(ea_zone, 0) >= zone_priority.get(static_zone or "Zone 1", 0):
+    # Flood Re exists for homes at genuine flood risk, so only the two
+    # higher bands qualify here. Real eligibility also depends on council
+    # tax band and build date, which this tool does not see.
+    flood_re_eligible = flood_risk_band in ("High", "Medium")
+
+    if not mapped:
+        source = "Outside the RoFRS mapped extent (London only) — risk unassessed"
+    elif ea_band and BAND_SEVERITY.get(ea_band, 0) > BAND_SEVERITY.get(mapped_band or "", 0):
         source = "Environment Agency flood-monitoring API (live warning)"
-    elif static_zone:
-        source = "EA Flood Map for Planning (static) + EA monitoring API (no active warnings)"
+    else:
+        source = "EA Risk of Flooding from Rivers and Sea (RoFRS), 2018 + EA monitoring API"
 
-    return {
+    result = {
         "postcode": postcode_clean,
         "latitude": lat,
         "longitude": lng,
-        "flood_zone": flood_zone,
-        "static_planning_zone": static_zone or "Zone 1",
-        "ea_live_warning_zone": ea_zone,
+        "easting": easting,
+        "northing": northing,
+        "flood_risk_band": flood_risk_band,
+        "risk_assessed": mapped,
+        "mapped_band": mapped_band,
+        "ea_live_warning_band": ea_band,
         "ea_severity_level": severity_level,
         "active_warnings_within_5km": active_warnings,
         "warning_descriptions": warning_descriptions[:3],
         "flood_re_eligible": flood_re_eligible,
+        "band_definition": {
+            "High": ">1 in 30 annual chance",
+            "Medium": "1 in 100 to 1 in 30",
+            "Low": "1 in 1000 to 1 in 100",
+            "Very Low": "<1 in 1000",
+        }.get(flood_risk_band),
         "data_source": source,
-        "coverage": "England only (EA data). Scotland: SEPA. Wales: NRW. NI: DfI Rivers."
+        "coverage": (
+            "RoFRS extract covers Greater London. Scotland: SEPA. "
+            "Wales: NRW. NI: DfI Rivers."
+        ),
     }
+
+    if not mapped:
+        result["note"] = (
+            "This postcode is outside the bundled RoFRS extract, so flood "
+            "risk could not be assessed. Refer for manual review — do not "
+            "treat an unassessed property as low risk."
+        )
+
+    return result
 
 
 # ---------------------------------------------------------------------------

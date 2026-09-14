@@ -339,10 +339,50 @@ def create_index(index_client: SearchIndexClient) -> None:
 # Step 4: Upload documents
 # ---------------------------------------------------------------------------
 
+def prune_stale_chunks(search_client: SearchClient, chunks: list[dict]) -> int:
+    """
+    Delete indexed documents that the current guidelines no longer produce.
+
+    Chunk ids embed an md5 of the chunk's content, so editing a section
+    yields a NEW id. merge_or_upload writes that new document but cannot
+    know the old one is obsolete — it is a different key — so the previous
+    wording stays in the index and remains retrievable. Rewriting the flood
+    section left the index holding both the old "Zone 3a" rules and the new
+    band rules at once, which the agent could retrieve interchangeably.
+
+    Returns the number of documents deleted.
+    """
+    current_ids = {chunk["id"] for chunk in chunks}
+
+    try:
+        existing = [
+            doc["id"]
+            for doc in search_client.search(search_text="*", select=["id"], top=1000)
+        ]
+    except Exception as e:
+        # A missing index on first run is normal — nothing to prune.
+        logger.info(f"No existing documents to prune ({type(e).__name__})")
+        return 0
+
+    stale = [doc_id for doc_id in existing if doc_id not in current_ids]
+    if not stale:
+        logger.info(f"No stale chunks — index holds {len(existing)} current documents")
+        return 0
+
+    search_client.delete_documents(documents=[{"id": doc_id} for doc_id in stale])
+    logger.info(
+        f"Pruned {len(stale)} stale chunk(s) left behind by earlier edits: "
+        + ", ".join(stale[:5]) + (" ..." if len(stale) > 5 else "")
+    )
+    return len(stale)
+
+
 def upload_chunks(search_client: SearchClient, chunks: list[dict]) -> None:
     """
     Upload embedded chunks to Azure AI Search in batches.
-    Uses merge_or_upload so re-runs are safe (idempotent).
+
+    merge_or_upload makes re-runs safe for unchanged content. Deleting
+    content that has changed id is prune_stale_chunks()'s job.
     """
     BATCH_SIZE = 100
 
@@ -365,7 +405,7 @@ def smoke_test(search_client: SearchClient, openai_client: AzureOpenAI) -> None:
     """
     test_queries = [
         "timber frame flood zone mandatory exclusion",
-        "Zone 3b decline criteria",
+        "High flood risk band decline criteria",
         "claims history 3 or more referral",
         "Flood Re eligibility council tax band",
     ]
@@ -430,9 +470,13 @@ def main():
     # 4. Create index
     create_index(index_client)
 
-    # 5. Upload
+    # 5. Upload, then remove anything the current document no longer produces
     upload_chunks(search_client, chunks)
-    logger.info(f"Ingest complete — {len(chunks)} chunks indexed into '{INDEX_NAME}'")
+    pruned = prune_stale_chunks(search_client, chunks)
+    logger.info(
+        f"Ingest complete — {len(chunks)} chunks indexed into '{INDEX_NAME}'"
+        + (f", {pruned} stale chunk(s) removed" if pruned else "")
+    )
 
     # 6. Smoke test
     smoke_test(search_client, openai_client)

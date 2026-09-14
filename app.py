@@ -245,10 +245,15 @@ def render_findings(findings: dict) -> None:
         if flood.get("error"):
             st.warning(flood["error"])
         else:
-            st.metric("Flood zone", _display_value(flood.get("flood_zone")))
+            band = flood.get("flood_risk_band", "Unknown")
+            st.metric("Flood risk", band)
+            if flood.get("band_definition"):
+                st.caption(flood["band_definition"])
+            if not flood.get("risk_assessed", True):
+                st.caption(flood.get("note", "Outside the mapped dataset."))
             st.caption(f"Flood Re eligible: {_yes_no(flood.get('flood_re_eligible'))}")
             if flood.get("ea_severity_level"):
-                st.caption(f"EA warning: {flood['ea_severity_level']}")
+                st.caption(f"EA live warning severity: {flood['ea_severity_level']}")
             if flood.get("data_source"):
                 st.caption(f"Source: {flood['data_source']}")
 
@@ -300,10 +305,13 @@ def render_findings(findings: dict) -> None:
         else:
             latest = sale_history.get("latest_sale") or {}
             price = latest.get("price_paid")
+            # The check carries no ratio when it could not be run — for
+            # example when no house number identified the property.
+            ratio = check.get("ratio_to_sale_price")
             st.metric(
                 "Last sale price",
                 f"£{price:,}" if price else "Unknown",
-                delta=f"{check['ratio_to_sale_price']}x cover" if check else None,
+                delta=f"{ratio}x cover" if ratio is not None else None,
                 delta_color="off",
             )
             st.caption(
