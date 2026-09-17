@@ -198,9 +198,11 @@ Any of the following automatically requires referral to a senior underwriter:
 6. Claims anomaly detected (declared vs verified discrepancy > 1)
 7. Sum insured above £1,000,000 (buildings) or £100,000 (contents)
 8. Property built before 1800
-9. Very high crime band (index > 80)
+9. VERY HIGH crime band (1459 or more property crimes per month within ~1
+   mile). The HIGH band alone is not a referral trigger — it carries a
+   loading and security requirements under section 6.
 10. Outstanding claims at time of submission
-11. Property partly used for business purposes
+11. Property partly used for business purposes, where declared
 12. Listed building
 
 ---

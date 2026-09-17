@@ -1,0 +1,568 @@
+{
+  "info": {
+    "name": "UW Risk Agent \u2014 /assess",
+    "description": "Twelve submissions for POST /assess on the underwriting API.\n\nCases 09/10 are a matched pair: identical High flood band, differing\nonly in build year either side of the Flood Re 2009 cut-off. Cases 11/12\nseparate the HIGH crime band (loading) from VERY_HIGH (referral).\n\nEach case isolates one decision driver where possible, and the\npostcodes were verified against the live tools rather than\ninvented \u2014 flood bands come from the EA RoFRS dataset, crime from\ndata.police.uk, sale prices from HM Land Registry, and claims from\nthe mock register in risk_server_v4.py.\n\nPrerequisites:\n  ./start.sh   (MCP :8001, API :8010)\n\nExpected outcomes are in each request's description. They are the\nunderwriting intent, not assertions \u2014 the agent applies judgement,\nso a borderline case may legitimately land one band away. The\ntests only check the response shape.\n\nEach request takes roughly 15-40s: the agent calls MCP tools in a\nloop before deciding. Raise Postman's timeout if needed.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8010",
+      "description": "Underwriting API. Override for a deployed instance."
+    }
+  ],
+  "item": [
+    {
+      "name": "01 Clean risk \u2014 expect ACCEPT",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"John Brown\",\n  \"date_of_birth\": \"1965-03-22\",\n  \"occupation\": \"Accountant\",\n  \"property_address\": \"14 Oldfield Road, Hampton\",\n  \"property_postcode\": \"TW12 2EU\",\n  \"property_type\": \"detached\",\n  \"year_built\": 1995,\n  \"construction\": \"brick\",\n  \"num_storeys\": 2,\n  \"product_type\": \"combined\",\n  \"sum_insured\": 350000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 0,\n  \"prior_claim_types\": [],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00101\"\n}"
+        },
+        "description": "Modern brick house, no claims, Very Low flood, LOW crime band (93/mo).\nNothing in this submission triggers a referral.\n\nExpected outcome: ACCEPT"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('01 Clean risk \u2014 expect ACCEPT ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "02 Timber pre-1920 + High flood \u2014 expect DECLINE",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"Jane Smith\",\n  \"date_of_birth\": \"1978-06-15\",\n  \"occupation\": \"Teacher\",\n  \"property_address\": \"6 Syds Quay, Eel Pie Island, Twickenham\",\n  \"property_postcode\": \"TW1 3DY\",\n  \"property_type\": \"detached\",\n  \"year_built\": 1912,\n  \"construction\": \"timber\",\n  \"num_storeys\": 2,\n  \"product_type\": \"combined\",\n  \"sum_insured\": 425000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 2,\n  \"prior_claim_types\": [\n    \"escape_of_water\",\n    \"subsidence\"\n  ],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00102\"\n}"
+        },
+        "description": "Eel Pie Island, in the Thames. RoFRS reports High (>1 in 30 annual chance).\nTimber frame built 1912 combined with High flood risk is a mandatory\ndecline under guideline 8.2. Applicant has 2 verified claims including\nsubsidence.\n\nExpected outcome: DECLINE"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('02 Timber pre-1920 + High flood \u2014 expect DECLINE ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "03 Flood risk unassessed \u2014 expect REFER",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"John Brown\",\n  \"date_of_birth\": \"1965-03-22\",\n  \"occupation\": \"Accountant\",\n  \"property_address\": \"3 Old Mill Lane, Denham\",\n  \"property_postcode\": \"UB9 4HN\",\n  \"property_type\": \"detached\",\n  \"year_built\": 1995,\n  \"construction\": \"brick\",\n  \"num_storeys\": 2,\n  \"product_type\": \"combined\",\n  \"sum_insured\": 350000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 0,\n  \"prior_claim_types\": [],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00103\"\n}"
+        },
+        "description": "Denham, outside the bundled RoFRS London extract, so flood_risk_band\nis 'Unassessed'. Crime is LOW and there are no claims, so flood is the\nonly open question. Missing data must refer, never pass as low risk.\n\nExpected outcome: REFER \u2014 flood risk could not be established"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('03 Flood risk unassessed \u2014 expect REFER ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "04 Crime data unavailable \u2014 expect REFER",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"Alice Jones\",\n  \"date_of_birth\": \"1990-11-01\",\n  \"occupation\": \"Designer\",\n  \"property_address\": \"12 Whitworth Street, Manchester\",\n  \"property_postcode\": \"M1 1AE\",\n  \"property_type\": \"flat\",\n  \"year_built\": 2005,\n  \"construction\": \"brick\",\n  \"num_storeys\": 2,\n  \"product_type\": \"contents\",\n  \"sum_insured\": 45000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 1,\n  \"prior_claim_types\": [\n    \"theft\"\n  ],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00104\"\n}"
+        },
+        "description": "Manchester city centre. Greater Manchester Police no longer publish to\ndata.police.uk, so crime_band is 'DATA_UNAVAILABLE' \u2014 not low crime.\nFlood is also Unassessed here (outside the London extract).\n\nExpected outcome: REFER \u2014 crime exposure could not be assessed"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('04 Crime data unavailable \u2014 expect REFER ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "05 Very high crime band \u2014 expect REFER",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"Alice Jones\",\n  \"date_of_birth\": \"1990-11-01\",\n  \"occupation\": \"Designer\",\n  \"property_address\": \"40 Whitechapel High Street, London\",\n  \"property_postcode\": \"E1 6AN\",\n  \"property_type\": \"flat\",\n  \"year_built\": 2008,\n  \"construction\": \"brick\",\n  \"num_storeys\": 1,\n  \"product_type\": \"combined\",\n  \"sum_insured\": 280000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 1,\n  \"prior_claim_types\": [\n    \"theft\"\n  ],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00105\"\n}"
+        },
+        "description": "Whitechapel. 1571 property crimes/month within ~1 mile, about 5.7x the\nmedian London postcode \u2014 the VERY_HIGH band (top ~10%). Flood is Very\nLow, so crime is the isolated signal.\n\nExpected outcome: REFER \u2014 senior underwriter, enhanced security survey"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('05 Very high crime band \u2014 expect REFER ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "06 Four claims with anomaly \u2014 expect DECLINE",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"Robert Lee\",\n  \"date_of_birth\": \"1955-07-14\",\n  \"occupation\": \"Retired\",\n  \"property_address\": \"8 Lubbock Road, Chislehurst\",\n  \"property_postcode\": \"BR7 5AQ\",\n  \"property_type\": \"detached\",\n  \"year_built\": 1968,\n  \"construction\": \"brick\",\n  \"num_storeys\": 2,\n  \"product_type\": \"combined\",\n  \"sum_insured\": 480000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 1,\n  \"prior_claim_types\": [\n    \"escape_of_water\"\n  ],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00106\"\n}"
+        },
+        "description": "Applicant declares 1 claim, but the claims register returns 4 verified\nclaims (two floods, escape of water, fire) and flags an anomaly.\n3+ claims in 5 years is outside appetite; the mismatch is itself a\nreferral trigger. Location is clean: Very Low flood, LOW crime.\n\nExpected outcome: DECLINE \u2014 claims history outside appetite"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('06 Four claims with anomaly \u2014 expect DECLINE ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "07 Sum insured far above last sale \u2014 expect REFER",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"Jane Smith\",\n  \"date_of_birth\": \"1978-06-15\",\n  \"occupation\": \"Teacher\",\n  \"property_address\": \"66 Westbury Hill, Bristol\",\n  \"property_postcode\": \"BS9 3AA\",\n  \"property_type\": \"detached\",\n  \"year_built\": 1930,\n  \"construction\": \"brick\",\n  \"num_storeys\": 2,\n  \"product_type\": \"buildings\",\n  \"sum_insured\": 2500000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 2,\n  \"prior_claim_types\": [\n    \"escape_of_water\",\n    \"subsidence\"\n  ],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00107\"\n}"
+        },
+        "description": "66 Westbury Hill sold for GBP 620,000 in 2014. Requesting GBP 2,500,000\nbuildings cover is about 4x that, which the Land Registry check reports\nas POSSIBLE_OVERINSURANCE. Also above the GBP 1,000,000 referral\nthreshold. Note buildings cover is rebuild cost and excludes land, so\ncover BELOW the sale price would be normal.\n\nExpected outcome: REFER \u2014 verify the rebuild-cost assessment"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('07 Sum insured far above last sale \u2014 expect REFER ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "08 Incomplete submission \u2014 expect REFER",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"Unknown Applicant\",\n  \"date_of_birth\": \"1899-01-01\",\n  \"occupation\": \"\",\n  \"property_address\": \"Flat 2\",\n  \"property_postcode\": \"TW1 3NP\",\n  \"property_type\": \"flat\",\n  \"year_built\": 1601,\n  \"construction\": \"brick\",\n  \"num_storeys\": 1,\n  \"product_type\": \"combined\",\n  \"sum_insured\": 15000.0,\n  \"policy_start_date\": \"2020-01-01\",\n  \"claims_last_5_years\": 0,\n  \"prior_claim_types\": [\n    \"fire\",\n    \"flood\"\n  ],\n  \"outstanding_claims\": true,\n  \"broker_reference\": null\n}"
+        },
+        "description": "Deliberately poor data quality: implausible build year, empty\noccupation, no broker reference, and claim types that contradict the\ndeclared claim count. Exercises validate_submission rather than the\nrisk tools.\n\nExpected outcome: REFER \u2014 submission validation flags"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('08 Incomplete submission \u2014 expect REFER ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "09 High flood + Flood Re + resilience \u2014 REFER or DECLINE",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"Alice Jones\",\n  \"date_of_birth\": \"1990-11-01\",\n  \"occupation\": \"Designer\",\n  \"property_address\": \"21 Ferry Road, Teddington\",\n  \"property_postcode\": \"TW11 9NN\",\n  \"property_type\": \"detached\",\n  \"year_built\": 1985,\n  \"construction\": \"brick\",\n  \"num_storeys\": 2,\n  \"product_type\": \"combined\",\n  \"sum_insured\": 610000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 1,\n  \"prior_claim_types\": [\n    \"theft\"\n  ],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00109\",\n  \"special_conditions\": \"Flood resilience measures installed 2022: raised electrics, solid concrete floor with sealed membrane, flood doors and airbrick covers. Certificate available on request.\"\n}"
+        },
+        "description": "Teddington, on the tidal Thames. RoFRS reports High (>1 in 30 annual\nchance) and flood_re_eligible is true. Built 1985, before the Flood Re\ncut-off of 1 January 2009, and flood resilience measures are declared in\nspecial_conditions.\n\nCrime is LOW (108/mo, 0.4x the London median), construction is brick and\nthere is one minor claim \u2014 flood is the only adverse signal, which makes\nthis a clean test of the Flood Re escape route.\n\nGuideline 3.1 says High risk is declined UNLESS Flood Re cession applies\nAND the property has flood resilience measures. Both conditions are met\nhere, so the guideline points to a Flood Re referral.\n\nIn practice this case is unstable: repeated runs return REFER and\nDECLINE on the same payload. The agent is weighing whether resilience\nmeasures genuinely offset a >1 in 30 flood probability, which is a\nlegitimate judgement call rather than a defect. Compare with case 10,\nwhich removes the Flood Re route entirely and declines consistently.\n\nExpected outcome: REFER (DECLINE also observed and defensible)"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('09 High flood, Flood Re eligible \u2014 expect REFER ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "10 High flood, post-2009 build \u2014 expect DECLINE",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"John Brown\",\n  \"date_of_birth\": \"1965-03-22\",\n  \"occupation\": \"Accountant\",\n  \"property_address\": \"4 Thameside, Kingston upon Thames\",\n  \"property_postcode\": \"KT1 1QN\",\n  \"property_type\": \"flat\",\n  \"year_built\": 2015,\n  \"construction\": \"brick\",\n  \"num_storeys\": 1,\n  \"product_type\": \"combined\",\n  \"sum_insured\": 540000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 0,\n  \"prior_claim_types\": [],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00110\"\n}"
+        },
+        "description": "Kingston riverside. RoFRS reports High, same as case 09, but this\nproperty was built in 2015 \u2014 after the Flood Re cut-off of 1 January\n2009, so cession is not available.\n\nThe contrast with case 09 is the point: identical flood band, opposite\noutcome, because the escape route of a Flood Re referral is closed.\nCrime here is MEDIUM (314/mo, 1.1x the London median).\n\nExpected outcome: DECLINE \u2014 High flood outside appetite, no Flood Re route"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('10 High flood, post-2009 build \u2014 expect DECLINE ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "11 High crime band \u2014 expect REFER (or ACCEPT with loading)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"John Brown\",\n  \"date_of_birth\": \"1965-03-22\",\n  \"occupation\": \"Accountant\",\n  \"property_address\": \"27 Stockwell Park Road, London\",\n  \"property_postcode\": \"SW9 8PR\",\n  \"property_type\": \"semi\",\n  \"year_built\": 1978,\n  \"construction\": \"brick\",\n  \"num_storeys\": 2,\n  \"product_type\": \"combined\",\n  \"sum_insured\": 395000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 0,\n  \"prior_claim_types\": [],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00111\"\n}"
+        },
+        "description": "Brixton. 954 property crimes/month within ~1 mile, about 3.4x the\nmedian London postcode \u2014 the HIGH band (busier than roughly 75% of\nLondon, but below the VERY_HIGH threshold of 1459).\n\nFlood is Very Low, construction is brick and there are no claims, so\ncrime is isolated.\n\nThis case is deliberately borderline. Guideline 6 puts HIGH at a 10%\nbuildings loading with minimum security requirements, and guideline 7\nlists only VERY HIGH as a mandatory referral \u2014 so the written rules\npoint to ACCEPT with a loading. In practice the agent refers, citing\ncrime above its automatic acceptance threshold, which the system prompt\npermits: it instructs the agent to apply judgement and names borderline\ncrime as a REFER trigger.\n\nBoth outcomes are underwriting-defensible. The case is included to show\nwhere the agent is more cautious than the letter of the guidelines, not\nto assert one correct answer.\n\nExpected outcome: REFER (ACCEPT with 10% loading also acceptable)"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('11 High crime band \u2014 expect ACCEPT with loading ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "12 Extreme crime exposure \u2014 expect REFER",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/assess",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "assess"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"applicant_name\": \"Alice Jones\",\n  \"date_of_birth\": \"1990-11-01\",\n  \"occupation\": \"Designer\",\n  \"property_address\": \"18 Dean Street, London\",\n  \"property_postcode\": \"W1D 3QU\",\n  \"property_type\": \"flat\",\n  \"year_built\": 1900,\n  \"construction\": \"brick\",\n  \"num_storeys\": 1,\n  \"product_type\": \"contents\",\n  \"sum_insured\": 65000.0,\n  \"policy_start_date\": \"2026-11-01\",\n  \"claims_last_5_years\": 1,\n  \"prior_claim_types\": [\n    \"theft\"\n  ],\n  \"outstanding_claims\": false,\n  \"broker_reference\": \"BRK-2026-00112\"\n}"
+        },
+        "description": "Soho. 2748 property crimes/month within ~1 mile, about 9.9x the median\nLondon postcode \u2014 the highest exposure in this collection and well\ninto the VERY_HIGH band (top ~10%, threshold 1459).\n\nA ground-floor flat with contents cover and a prior theft claim\ncompounds it. Guideline 6 requires a senior underwriter referral and\nan enhanced security survey at this band. Flood is Very Low, so crime\ndrives the decision on its own.\n\nExpected outcome: REFER \u2014 senior underwriter, enhanced security survey"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json();",
+              "pm.test('decision is valid', () =>",
+              "    pm.expect(['ACCEPT','REFER','DECLINE']).to.include(d.decision));",
+              "pm.test('rationale present', () =>",
+              "    pm.expect(d.rationale).to.be.a('string').and.not.empty);",
+              "pm.test('provider echoed', () =>",
+              "    pm.expect(d.provider).to.be.oneOf(['azure','ollama']));",
+              "console.log('12 Extreme crime exposure \u2014 expect REFER ->', d.decision, d.confidence, '|', (d.risk_flags||[]).join(', '));"
+            ]
+          }
+        }
+      ],
+      "response": []
+    }
+  ]
+}
