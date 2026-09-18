@@ -6,7 +6,13 @@
 ## 1. Scope and Purpose
 
 These guidelines apply to all UK personal lines property submissions including
-buildings insurance, contents insurance, and combined policies. Underwriters
+buildings insurance, contents insurance, and combined policies.
+
+Data coverage caveat: the flood risk dataset behind section 3.1 covers
+Greater London only, and the crime bands in section 6 are calibrated against
+London postcodes. Submissions outside London will return an Unassessed flood
+band and must be referred; their crime figures remain valid but are compared
+against a London baseline, which overstates how unusual they are. Underwriters
 must apply these rules in conjunction with current rate tables and individual
 risk judgement. Where a submission falls outside these guidelines, it must be
 referred to a senior underwriter.
@@ -105,10 +111,19 @@ rather than declining outright. The Flood Re team will provide a cession price
 based on council tax band.
 
 ### 3.3 Surface Water Flood Risk
-In addition to river flood zone, assess surface water flood depth:
+Surface water risk is separate from the rivers-and-sea band in section 3.1
+and is NOT currently measured by any automated data source available to the
+assessment. Treat it as unassessed on every submission.
+
+Do not infer that surface water risk is absent, low, or acceptable because
+no figure was returned — no figure is ever returned. Where a broker declares
+surface water depth, or a survey supplies one, apply:
 - Depth < 0.15m at 1-in-75 year return period: no additional loading
 - Depth 0.15m–0.50m: additional 10% loading
 - Depth > 0.50m: refer to senior underwriter
+
+Absent a declared figure, surface water is not a referral trigger by itself;
+it is a known gap in the evidence rather than a clean result.
 
 ---
 
@@ -190,9 +205,11 @@ Minimum security requirements for HIGH crime band:
 
 Any of the following automatically requires referral to a senior underwriter:
 
-1. Timber frame construction (any flood zone)
+1. Timber frame construction (at any flood risk band)
 2. Medium flood risk band
-3. Surface water flood depth > 0.50m at 1-in-75 years
+3. Surface water flood depth > 0.50m at 1-in-75 years, where a depth has
+   been declared or surveyed. No automated source supplies this, so it does
+   not fire on data alone — see section 3.3
 4. 3 or more claims in the past 5 years
 5. Any subsidence claim in the past 5 years
 6. Claims anomaly detected (declared vs verified discrepancy > 1)
@@ -211,7 +228,9 @@ Any of the following automatically requires referral to a senior underwriter:
 
 The following constitute grounds for automatic decline:
 
-1. High flood risk band (unless Flood Re cession applies)
+1. High flood risk band, unless BOTH conditions in section 3.1 are met:
+   Flood Re cession applies AND the property has flood resilience measures.
+   Where both hold, refer to the Flood Re team rather than declining.
 2. Timber frame construction AND Medium or High flood risk
 3. 4 or more claims in the past 5 years
 4. Two or more subsidence claims

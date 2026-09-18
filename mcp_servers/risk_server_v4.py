@@ -111,6 +111,10 @@ from rofrs import band_at, in_coverage, BAND_SEVERITY
 # raises the assessed risk; it never lowers the mapped baseline.
 EA_SEVERITY_TO_BAND = {1: "High", 2: "High", 3: "Medium"}
 
+# Flood Re excludes homes built on or after 1 January 2009, so that new
+# development on floodplains is not subsidised by the levy.
+FLOOD_RE_BUILD_CUTOFF = 2009
+
 
 # ---------------------------------------------------------------------------
 # Tool 1: get_flood_zone
@@ -119,7 +123,7 @@ EA_SEVERITY_TO_BAND = {1: "High", 2: "High", 3: "Medium"}
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def get_flood_zone(postcode: str) -> dict:
+async def get_flood_zone(postcode: str, year_built: int = 0) -> dict:
     """
     Returns flood risk data for a UK property postcode.
 
@@ -140,6 +144,11 @@ async def get_flood_zone(postcode: str) -> dict:
 
     flood_risk_band is "Unassessed" where the property lies outside the
     mapped dataset. Treat that as a referral, never as low risk.
+
+    Pass year_built to get a real Flood Re answer. Cession requires the
+    property to predate 1 January 2009, so without a build year the tool
+    reports flood_re_eligible false and explains why in flood_re_note —
+    it will not guess.
 
     Coverage: the bundled RoFRS extract is Greater London. Scotland uses
     SEPA, Wales NRW, Northern Ireland DfI Rivers.
@@ -203,9 +212,42 @@ async def get_flood_zone(postcode: str) -> dict:
         flood_risk_band = "Unassessed"
 
     # Flood Re exists for homes at genuine flood risk, so only the two
-    # higher bands qualify here. Real eligibility also depends on council
-    # tax band and build date, which this tool does not see.
-    flood_re_eligible = flood_risk_band in ("High", "Medium")
+    # higher bands qualify. Eligibility also requires a build date before
+    # 1 January 2009 — a scheme rule, not a risk judgement. Reporting
+    # eligibility from the band alone made every new-build on a floodplain
+    # look cessionable, which reversed the decision on exactly the cases
+    # the cut-off exists to catch.
+    band_qualifies = flood_risk_band in ("High", "Medium")
+    if not year_built:
+        # Build date unknown: report what we can check and say what we cannot.
+        flood_re_eligible = False
+        flood_re_note = (
+            "Flood Re eligibility could not be confirmed: no build year was "
+            "supplied. The flood band "
+            + ("qualifies" if band_qualifies else "does not qualify")
+            + ". Cession also requires construction before 1 January 2009, "
+            "plus council tax band A-G and primary residence use, which this "
+            "tool does not check."
+        )
+    elif year_built >= FLOOD_RE_BUILD_CUTOFF:
+        flood_re_eligible = False
+        flood_re_note = (
+            f"Not eligible for Flood Re: built {year_built}, on or after the "
+            f"{FLOOD_RE_BUILD_CUTOFF} cut-off. Properties built from "
+            f"{FLOOD_RE_BUILD_CUTOFF} are excluded from the scheme regardless "
+            "of flood risk."
+        )
+    else:
+        flood_re_eligible = band_qualifies
+        flood_re_note = (
+            f"Built {year_built}, before the {FLOOD_RE_BUILD_CUTOFF} cut-off, "
+            "and the flood band qualifies. Final cession still depends on "
+            "council tax band A-G and primary residence use, which this tool "
+            "does not check."
+            if band_qualifies else
+            f"Built {year_built}, before the {FLOOD_RE_BUILD_CUTOFF} cut-off, "
+            "but the flood band does not qualify for cession."
+        )
 
     if not mapped:
         source = "Outside the RoFRS mapped extent (London only) — risk unassessed"
@@ -228,6 +270,8 @@ async def get_flood_zone(postcode: str) -> dict:
         "active_warnings_within_5km": active_warnings,
         "warning_descriptions": warning_descriptions[:3],
         "flood_re_eligible": flood_re_eligible,
+        "flood_re_band_qualifies": band_qualifies,
+        "flood_re_note": flood_re_note,
         "band_definition": {
             "High": ">1 in 30 annual chance",
             "Medium": "1 in 100 to 1 in 30",

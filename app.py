@@ -10,6 +10,7 @@ monitor for ACCEPT, DECLINE, and REFER decisions.
 """
 
 import json
+from pathlib import Path
 import logging
 import os
 from datetime import datetime
@@ -379,69 +380,189 @@ def render_assessment_result(result: dict) -> None:
         st.code(result["raw_agent_output"], language="json")
 
 
+def _option_index(options: list, value) -> int:
+    """Index of value in options, or 0 when the preset carries something else."""
+    try:
+        return options.index(value)
+    except ValueError:
+        return 0
+
+
+TEST_CASES_PATH = Path(__file__).resolve().parent / "tests" / "uw_assess.postman_collection.json"
+
+BLANK_CASE = "— none (enter manually) —"
+
+
+@st.cache_data(ttl=300)
+def load_test_cases() -> dict[str, dict]:
+    """
+    Read the Postman collection so the form can be pre-filled from a case.
+
+    The collection is the single source of these submissions: keeping a
+    second copy in the UI would let the two drift, and the whole point of
+    the cases is that their postcodes were verified against the live tools.
+    Returns {case name: {"body": {...}, "description": str}}.
+    """
+    try:
+        collection = json.loads(TEST_CASES_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        st.warning(f"Test cases unavailable: {exc}")
+        return {}
+
+    cases: dict[str, dict] = {}
+    for item in collection.get("item", []):
+        raw = (item.get("request", {}).get("body", {}) or {}).get("raw")
+        if not raw:
+            continue
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            continue
+        cases[item.get("name", "unnamed")] = {
+            "body": body,
+            "description": item.get("request", {}).get("description", ""),
+        }
+    return cases
+
+
+def render_case_picker(cases: dict[str, dict]) -> dict:
+    """
+    Case selector. Returns the submission body to pre-fill the form with.
+
+    Streamlit keeps widget values across reruns, so the form is rebuilt with
+    a key derived from the chosen case — otherwise switching cases would
+    leave the previous values in the inputs.
+    """
+    st.subheader("Test cases")
+    st.caption(
+        "Twelve submissions from the Postman collection. Picking one fills "
+        "the form; every field stays editable."
+    )
+
+    if not cases:
+        st.info(
+            "No test cases found at\n\n"
+            f"`{TEST_CASES_PATH.relative_to(Path.cwd()) if TEST_CASES_PATH.is_relative_to(Path.cwd()) else TEST_CASES_PATH}`"
+        )
+        return {}
+
+    choice = st.selectbox(
+        "Pre-fill from case",
+        [BLANK_CASE] + list(cases),
+        index=0,
+        label_visibility="collapsed",
+    )
+    if choice == BLANK_CASE:
+        st.caption("Form shows its own defaults.")
+        return {}
+
+    case = cases[choice]
+    body = case["body"]
+
+    st.markdown(
+        f"**{body.get('property_postcode', '?')}** · "
+        f"{body.get('construction', '?')} · built {body.get('year_built', '?')} · "
+        f"£{body.get('sum_insured', 0):,.0f}"
+    )
+    with st.expander("Why this case exists", expanded=False):
+        st.caption(case["description"] or "No description.")
+    return body
+
+
 def render_assessment_page() -> None:
     st.title("Underwriting Risk Assessment")
-    st.caption("Agentic underwriting over MCP tools and a RAG guidelines index")
+    st.caption("Agentic underwriting over MCP risk tools and UK open data")
 
-    with st.form("submission_form"):
+    picker_col, form_col = st.columns([1, 3], gap="large")
+
+    with picker_col:
+        preset = render_case_picker(load_test_cases())
+
+    def pre(field, fallback):
+        """Preset value for a field, falling back to the form default."""
+        value = preset.get(field)
+        return fallback if value is None else value
+
+    form_col_ctx = form_col.container()
+    with form_col_ctx, st.form(f"submission_form_{hash(json.dumps(preset, sort_keys=True))}"):
         st.subheader("Applicant")
         col1, col2, col3 = st.columns(3)
-        applicant_name = col1.text_input("Full name", value="Jane Smith")
-        date_of_birth = col2.text_input(
-            "Date of birth (YYYY-MM-DD)", value="1978-06-15"
+        applicant_name = col1.text_input(
+            "Full name", value=pre("applicant_name", "Jane Smith")
         )
-        occupation = col3.text_input("Occupation", value="Teacher")
+        date_of_birth = col2.text_input(
+            "Date of birth (YYYY-MM-DD)", value=pre("date_of_birth", "1978-06-15")
+        )
+        occupation = col3.text_input(
+            "Occupation", value=pre("occupation", "Teacher")
+        )
 
         st.subheader("Risk Location")
         col4, col5 = st.columns(2)
         property_address = col4.text_input(
-            "Address", value="12 Riverside Close, Bristol"
+            "Address",
+            value=pre("property_address", "6 Syds Quay, Eel Pie Island, Twickenham"),
         )
-        property_postcode = col5.text_input("Postcode", value="BS1 4DJ")
+        property_postcode = col5.text_input(
+            "Postcode", value=pre("property_postcode", "TW1 3DY")
+        )
 
         col6, col7, col8, col9 = st.columns(4)
+        property_types = ["detached", "semi", "flat", "commercial"]
         property_type = col6.selectbox(
-            "Property type", ["detached", "semi", "flat", "commercial"]
+            "Property type", property_types,
+            index=_option_index(property_types, pre("property_type", "detached")),
         )
         year_built = col7.number_input(
-            "Year built", min_value=1600, max_value=2026, value=1912
+            "Year built", min_value=1600, max_value=2026,
+            value=int(pre("year_built", 1912))
         )
+        constructions = ["brick", "timber", "concrete"]
         construction = col8.selectbox(
-            "Construction", ["brick", "timber", "concrete"]
+            "Construction", constructions,
+            index=_option_index(constructions, pre("construction", "brick")),
         )
         num_storeys = col9.number_input(
-            "Storeys", min_value=1, max_value=20, value=2
+            "Storeys", min_value=1, max_value=20, value=int(pre("num_storeys", 2))
         )
 
         st.subheader("Coverage")
         col10, col11, col12 = st.columns(3)
+        products = ["buildings", "contents", "combined"]
         product_type = col10.selectbox(
-            "Product", ["buildings", "contents", "combined"]
+            "Product", products,
+            index=_option_index(products, pre("product_type", "combined")),
         )
         sum_insured = col11.number_input(
             "Sum insured (£)",
             min_value=10000,
             max_value=10000000,
-            value=425000,
+            value=int(pre("sum_insured", 425000)),
             step=5000,
         )
         policy_start_date = col12.text_input(
-            "Start date (YYYY-MM-DD)", value="2026-05-01"
+            "Start date (YYYY-MM-DD)", value=pre("policy_start_date", "2026-05-01")
         )
 
         st.subheader("Claims History")
         col13, col14, col15 = st.columns(3)
         claims_last_5_years = col13.number_input(
-            "Claims in last 5 years", min_value=0, max_value=20, value=2
+            "Claims in last 5 years", min_value=0, max_value=20,
+            value=int(pre("claims_last_5_years", 2))
         )
         prior_claim_types_str = col14.text_input(
             "Claim types (comma-separated)",
-            value="escape_of_water, subsidence",
+            value=", ".join(pre("prior_claim_types", ["escape_of_water", "subsidence"])),
         )
-        outstanding_claims = col15.checkbox("Outstanding claims?", value=False)
+        outstanding_claims = col15.checkbox(
+            "Outstanding claims?", value=bool(pre("outstanding_claims", False))
+        )
 
         broker_reference = st.text_input(
-            "Broker reference (optional)", value="BRK-2026-00142"
+            "Broker reference (optional)",
+            value=pre("broker_reference", "BRK-2026-00142") or "",
         )
 
         submitted = st.form_submit_button(

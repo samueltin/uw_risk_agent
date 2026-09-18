@@ -11,7 +11,7 @@
 
 A production-grade agentic AI system for UK property insurance underwriting.
 Built with **Microsoft Agent Framework**, **MCP (Model Context Protocol)**,
-**Azure OpenAI**, and **Azure AI Search RAG**, served over **FastAPI**.
+**Azure OpenAI**, served over **FastAPI**.
 Runs fully locally with Ollama or against Azure OpenAI.
 
 The agent loop runs **in the API process**, not in a hosted service, so the
@@ -63,8 +63,9 @@ Broker submission
 │   ├── get_flood_zone()               ← MCP tool (EA API) │
 │   ├── get_crime_index()              ← MCP tool (Police) │
 │   ├── get_claims_history()           ← MCP tool          │
-│   ├── get_property_sale_history()    ← MCP tool (Land Reg)│
-│   └── search_uw_guidelines()         ← Azure AI Search RAG│
+│   └── get_property_sale_history()    ← MCP tool (Land Reg)│
+│                                                          │
+│  Underwriting guidelines inlined in the system prompt    │
 │                                                          │
 │  Loop: LLM → tool call → result → LLM → repeat           │
 │  until LLM produces final JSON decision                  │
@@ -111,8 +112,7 @@ mcp_servers/risk_server_v4.py (FastMCP server)
 | LLM — cloud | Azure OpenAI `gpt-4.1` (GlobalStandard) |
 | LLM — local | Ollama `llama3.1:8b` on GTX 1070 |
 | Tool protocol | MCP — Model Context Protocol (FastMCP, streamable-http) |
-| Knowledge base | Azure AI Search + RAG (UW guidelines) |
-| Embeddings | Azure OpenAI `text-embedding-3-small` |
+| Knowledge base | UW guidelines inlined in the system prompt (~2.6k tokens) |
 | External APIs | Environment Agency flood, data.police.uk crime, HM Land Registry Price Paid |
 | Decision dispatch | Azure Storage Queues (accept / refer / decline) |
 | UI | Streamlit |
@@ -142,7 +142,7 @@ uw_risk_agent/
 │
 ├── knowledge_base/
 │   ├── uw_guidelines.md         # UK P&C underwriting guidelines document
-│   └── ingest.py                # Chunk → embed → index into Azure AI Search
+│   └── ingest.py                # Legacy: chunk → embed → index (RAG retired)
 │
 ├── monitor/
 │   └── telemetry.py             # App Insights / OpenTelemetry helpers
@@ -339,7 +339,7 @@ deterministic and run concurrently with no model round-trips.
 |---|---|
 | Transport | Streamable HTTP (`/mcp` path) — production standard |
 | Protocol | JSON-RPC 2.0 — request / response / notification |
-| Primitives | Tools (5 underwriting tools) + Resources (guidelines sections) |
+| Primitives | Tools (5 underwriting tools) |
 | Client-side connector | Agent loop runs in-process, so a localhost MCP server works |
 | Security | System prompt hardening against prompt injection |
 | Inspection | FastMCP Inspector compatible |
@@ -438,18 +438,27 @@ This project demonstrates all four main agentic patterns:
 
 ## Key design decisions
 
+**Why inline the guidelines instead of RAG?**
+The guidelines document is about 2,600 tokens — small enough to pass whole.
+Retrieval returned the top 3 chunks for a single query, which routinely
+omitted sections the decision needed: a query about crime loading returned
+sections 6 and 9 but not section 7, so the agent could not tell whether a
+HIGH crime band was a mandatory referral and had to guess. Inlining costs
+roughly 2k extra tokens per assessment and removes the AI Search service,
+the embeddings deployment, the ingest pipeline, and a class of bug where
+edited chunks left their superseded versions retrievable.
+
+At a real insurer's scale — hundreds of pages — retrieval would be the right
+answer again, with a retrieval strategy that always includes the mandatory
+trigger and decline sections.
+
+
+
 **Why MCP over direct function calling?**
 Tools are defined once in `risk_server_v4.py` and shared across any MCP-compatible
 host — Microsoft Agent Framework, LangChain, Claude Desktop, or any future
 framework — without code changes. Adding a new tool means updating the server
 only, not every consumer.
-
-**Why inline guidelines for local / RAG for cloud?**
-`llama3.1:8b` on 8GB VRAM has a practical context window in the low tens of
-thousands of tokens. With inline guidelines (~2k tokens) the model reasons
-about the full ruleset without retrieval latency. `gpt-4.1` with RAG uses
-semantic search to retrieve relevant guideline sections, reducing input
-tokens per call.
 
 **Why does the local provider not use the agent loop?**
 `llama3.1:8b` handles a single constrained JSON response well, but drifts

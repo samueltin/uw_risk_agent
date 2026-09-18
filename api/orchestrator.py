@@ -117,7 +117,7 @@ async def _build_chat_client(stack: AsyncExitStack):
 # System prompt — same decision criteria as orchestrator_legacy.py
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT_TEMPLATE = """
 You are a senior property insurance underwriter at a UK insurer.
 
 Your goal: assess the risk of a broker submission and produce an
@@ -128,18 +128,34 @@ necessary. Keep calling tools until you have sufficient evidence.
 
 Tools available:
   - validate_submission(submission_json): check data completeness and flags
-  - get_flood_zone(postcode): EA RoFRS flood risk band and Flood Re eligibility
-  - get_crime_index(postcode): property crime exposure
+  - get_flood_zone(postcode, year_built): EA RoFRS flood risk band and
+      Flood Re eligibility. Always pass year_built — Flood Re excludes
+      properties built on or after 2009, and without it the tool cannot
+      confirm eligibility
+  - get_crime_index(postcode): property crime exposure, as a band and as a
+      multiple of the median London postcode
   - get_claims_history(applicant_name, date_of_birth): verify prior claims
   - get_property_sale_history(postcode, house_number, sum_insured): Land
       Registry sale prices, with a sum-insured plausibility check
-  - search_uw_guidelines(query): search the underwriting guidelines knowledge base
 
 Reading the tool results:
   - Flood risk uses EA RoFRS bands: High (>1 in 30 annual chance), Medium
     (1 in 100 to 1 in 30), Low (1 in 1000 to 1 in 100), Very Low (<1 in
     1000). These are not Flood Map for Planning zones — do not translate
     them into Zone 1/2/3a/3b.
+  - Crime uses bands measured against London, where the median postcode has
+    277 property crimes per month within about a mile:
+      LOW       under 112/month      quieter than ~75% of London
+      MEDIUM    112 to 619/month     the typical London range
+      HIGH      620 to 1458/month    busier than ~75% of London
+      VERY_HIGH 1459/month or more   the top ~10%
+    HIGH is NOT a referral trigger on its own: guideline 6 prices it with a
+    10% loading and minimum security requirements. VERY_HIGH is a referral.
+    Read vs_london_median for magnitude, not crime_index, which saturates
+    at 100 for any urban postcode and cannot separate Bristol from Soho.
+  - The flood dataset covers Greater London only. A flood_risk_band of
+    "Unassessed" outside London is expected geography, not a broken tool —
+    but it still means the risk is unknown, so it still refers.
   - Buildings cover is REBUILD cost and excludes land, so a sum insured
     below the last sale price is normal. Act only on the tool's own
     verdict (POSSIBLE_OVERINSURANCE / POSSIBLE_UNDERINSURANCE), and note
@@ -152,81 +168,61 @@ Decision criteria (apply judgement — these are guides, not rigid rules):
   ACCEPT:  No referral triggers. Risk within appetite. No mandatory exclusions.
   REFER:   Any referral trigger present. Borderline flood/crime. Claims anomaly.
            Sum insured above £1,000,000. Uncertain or conflicting signals.
-  DECLINE: Risk clearly outside appetite. Examples: High flood risk band,
-           3+ claims in 5 years, mandatory exclusion applies,
-           timber pre-1920 construction + Medium or High flood risk.
+  DECLINE: Risk clearly outside appetite. Examples: 3+ claims in 5 years,
+           mandatory exclusion applies, timber pre-1920 construction +
+           Medium or High flood risk.
+           High flood risk band is a decline UNLESS BOTH apply: the property
+           is Flood Re eligible AND flood resilience measures are declared.
+           Where both hold, REFER to the Flood Re team instead of declining
+           — see guideline 3.1, which governs.
+
+Writing the rationale — cite the findings, do not just assert conclusions:
+  - Quote the actual figures the tools returned, so a reader can check the
+    decision without re-running anything. "Crime exposure is HIGH (954
+    property crimes per month, 3.4x the median London postcode)" is useful;
+    "the area has high crime" is not.
+  - Name the source of each material finding: the RoFRS flood band, the
+    monthly crime figure and its multiple of the London median, the
+    verified claims count from the claims register, the last sale price and
+    year from Land Registry, and the guideline section you applied.
+  - Where the submission and a tool disagree, state both numbers. For
+    example a declared claim count against the verified count.
+  - Where a figure is missing, say so explicitly and say it drove a
+    referral. Never imply a value you were not given.
+  - Every risk flag you raise must be traceable to a figure in the
+    rationale. Do not flag a risk the evidence does not support.
 
 When you are confident in your decision, return ONLY a JSON object:
 {
   "decision": "ACCEPT" | "REFER" | "DECLINE",
   "confidence": "HIGH" | "MEDIUM" | "LOW",
-  "rationale": "<plain English explanation, 3-5 sentences>",
+  "rationale": "<plain English explanation, 3-5 sentences, quoting the tool
+                 figures that support the decision>",
   "risk_flags": ["<all material risk flags identified>"],
   "flood_re_eligible": <true | false>,
   "refer_reason": "<reason if REFER, else null>",
   "recommended_premium_loading": <percentage float if ACCEPT with loading, else null>
 }
+
+The complete underwriting guidelines follow. They are the authority on
+appetite, referral triggers, decline criteria and loadings — apply them in
+full rather than relying on the summary above, and cite the section you
+applied in your rationale.
+
+--- BEGIN UNDERWRITING GUIDELINES ---
+__GUIDELINES__
+--- END UNDERWRITING GUIDELINES ---
 """
 
 
-# ---------------------------------------------------------------------------
-# RAG tool — a local Python function, not a hosted Foundry tool
-#
-# orchestrator_legacy.py uses AzureAISearchTool, which only exists inside the
-# Foundry Agent Service. MAF has no equivalent, so the retrieval runs here
-# and queries the same index over HTTPS. The index carries a vectorizer,
-# so the service embeds the query for us — no local embedding call.
-# ---------------------------------------------------------------------------
-
-def search_uw_guidelines(query: str) -> str:
-    """Search the underwriting guidelines knowledge base.
-
-    Args:
-        query: Natural-language description of the guideline to look up,
-            e.g. "medium flood risk appetite" or "timber frame construction".
-
-    Returns:
-        The most relevant guideline passages, or a notice if unavailable.
+def build_system_prompt() -> str:
     """
-    from azure.search.documents import SearchClient
-    from azure.search.documents.models import VectorizableTextQuery
-    from azure.identity import DefaultAzureCredential as SyncCredential
+    The system prompt with the full guidelines document inlined.
 
-    endpoint = os.environ["AZURE_SEARCH_ENDPOINT"]
-    index    = os.environ.get("AZURE_SEARCH_INDEX_NAME", "uw-guidelines")
-
-    try:
-        client = SearchClient(
-            endpoint=endpoint,
-            index_name=index,
-            credential=SyncCredential(),
-        )
-        results = client.search(
-            search_text=query,
-            vector_queries=[
-                VectorizableTextQuery(
-                    text=query, k_nearest_neighbors=3, fields="content_vector"
-                )
-            ],
-            select=["section", "content"],
-            top=3,
-        )
-        hits = [f"## {r.get('section', 'Guideline')}\n{r.get('content', '')}" for r in results]
-    except Exception as e:
-        # Index missing or unreachable — tell the agent plainly rather than
-        # raising, so it can still reach a (suitably cautious) decision.
-        logger.warning(f"Guideline search failed: {e}")
-        return (
-            f"Guideline search unavailable ({type(e).__name__}). "
-            "Proceed using the submission data and risk tools alone, and "
-            "reflect the missing guidance in your confidence level."
-        )
-
-    if not hits:
-        return f"No guidelines matched '{query}'."
-
-    logger.info(f"Guideline search | query='{query}' | hits={len(hits)}")
-    return "\n\n".join(hits)
+    Uses a sentinel rather than str.format: the prompt contains a literal
+    JSON shape, and format() reads those braces as fields.
+    """
+    return SYSTEM_PROMPT_TEMPLATE.replace("__GUIDELINES__", load_guidelines())
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +233,17 @@ def search_uw_guidelines(query: str) -> str:
 # explicitly, then ask the model for a single constrained JSON decision.
 # ---------------------------------------------------------------------------
 
-def _load_local_guidelines() -> str:
-    """Load local underwriting guidelines for Ollama runs without Azure Search."""
+def load_guidelines() -> str:
+    """
+    Read the underwriting guidelines from disk, in full.
+
+    The document is about 2,600 tokens, so both providers get the complete
+    ruleset in the prompt rather than retrieved fragments. Retrieval used to
+    return the top 3 chunks for one query, which routinely omitted the
+    sections a decision needs: a query about crime loading returned sections
+    6 and 9 but not section 7, so the agent could not tell whether a HIGH
+    band was a mandatory referral and had to guess.
+    """
     try:
         text = GUIDELINES_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -305,7 +310,13 @@ async def collect_findings(submission: UnderwritingSubmission) -> dict:
 
     mcp_url = os.environ.get("MCP_RISK_SERVER_URL", "http://127.0.0.1:8001/mcp")
     calls = {
-        "flood": ("get_flood_zone", {"postcode": submission.property_postcode}),
+        "flood": (
+            "get_flood_zone",
+            {
+                "postcode": submission.property_postcode,
+                "year_built": submission.year_built,
+            },
+        ),
         "crime": ("get_crime_index", {"postcode": submission.property_postcode}),
         "claims": (
             "get_claims_history",
@@ -383,7 +394,12 @@ async def _collect_ollama_evidence(
             mcp, "validate_submission", {"submission_json": submission_json}
         )
         evidence["get_flood_zone"] = await _call_mcp_tool(
-            mcp, "get_flood_zone", {"postcode": submission.property_postcode}
+            mcp,
+            "get_flood_zone",
+            {
+                "postcode": submission.property_postcode,
+                "year_built": submission.year_built,
+            },
         )
         evidence["get_crime_index"] = await _call_mcp_tool(
             mcp, "get_crime_index", {"postcode": submission.property_postcode}
@@ -417,7 +433,10 @@ def _build_ollama_decision_prompt(
     schema = {
         "decision": "ACCEPT | REFER | DECLINE",
         "confidence": "HIGH | MEDIUM | LOW",
-        "rationale": "plain English explanation, 3-5 sentences",
+        "rationale": (
+            "plain English explanation, 3-5 sentences, quoting the specific "
+            "figures from the tool evidence that support the decision"
+        ),
         "risk_flags": ["all material risk flags identified"],
         "flood_re_eligible": "true | false",
         "refer_reason": "reason if REFER, else null",
@@ -436,12 +455,30 @@ def _build_ollama_decision_prompt(
         "ACCEPT: no referral triggers, risk within appetite, no mandatory exclusions.\n"
         "REFER: any referral trigger, borderline flood/crime, claims anomaly, "
         "sum insured above £1,000,000, uncertain or conflicting signals.\n"
-        "DECLINE: clearly outside appetite, including High flood risk band, "
-        "3+ claims in 5 years, mandatory exclusion, or timber pre-1920 "
-        "construction plus Medium or High flood risk.\n\n"
+        "DECLINE: clearly outside appetite, including 3+ claims in 5 years, "
+        "mandatory exclusion, or timber pre-1920 construction plus Medium or "
+        "High flood risk. High flood risk band is a decline UNLESS BOTH the "
+        "property is Flood Re eligible AND flood resilience measures are "
+        "declared; where both hold, REFER to the Flood Re team instead "
+        "(guideline 3.1 governs).\n\n"
         "Flood risk uses EA RoFRS bands (High / Medium / Low / Very Low), not "
-        "Flood Map for Planning zones. A flood_risk_band of 'Unassessed' means "
-        "the risk is unknown: refer, never treat it as low risk.\n\n"
+        "Flood Map for Planning zones. The dataset covers Greater London only, "
+        "so 'Unassessed' outside London is expected geography rather than a "
+        "broken tool — but the risk is still unknown, so it still refers.\n\n"
+        "Crime bands are measured against London, where the median postcode "
+        "has 277 property crimes per month within about a mile: LOW under "
+        "112/month, MEDIUM 112-619, HIGH 620-1458, VERY_HIGH 1459 or more. "
+        "HIGH is not a referral trigger on its own — guideline 6 prices it "
+        "with a 10% loading and minimum security requirements. VERY_HIGH is a "
+        "referral. Use vs_london_median for magnitude, not crime_index, which "
+        "saturates at 100 for any urban postcode.\n\n"
+        "Cite the findings in the rationale. Quote the actual numbers from the "
+        "tool evidence — the flood band, the monthly crime figure and its "
+        "multiple of the London median, the verified claims count, the last "
+        "sale price and year — so a reader can check the decision without "
+        "re-running the tools. Where a figure is missing, say so and say it "
+        "drove a referral. Every risk flag must be traceable to a figure you "
+        "quoted; do not flag a risk the evidence does not support.\n\n"
         f"Required JSON shape:\n{json.dumps(schema, indent=2)}\n\n"
         f"Submission JSON:\n{submission.to_json()}\n\n"
         f"Tool evidence JSON:\n{json.dumps(evidence, indent=2)}\n\n"
@@ -475,7 +512,7 @@ async def _run_ollama_assessment_async(
     messages = _build_ollama_decision_prompt(
         submission=submission,
         evidence=evidence,
-        guidelines=_load_local_guidelines(),
+        guidelines=load_guidelines(),
     )
 
     client = ollama.Client(host=host)
@@ -544,9 +581,9 @@ async def _run_assessment_async(
         # remotely, so there is nothing to clean up afterwards.
         agent = Agent(
             client=chat_client,
-            instructions=SYSTEM_PROMPT,
+            instructions=build_system_prompt(),
             name="uw-risk-agent",
-            tools=[mcp_tool, search_uw_guidelines],
+            tools=[mcp_tool],
         )
 
         with tracer.start_as_current_span("uw_agent_run") as span:
