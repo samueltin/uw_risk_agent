@@ -35,7 +35,7 @@ The agent receives a broker submission and a set of tools, then autonomously dec
 - Whether to call more tools based on what it finds
 - When it has enough evidence to reach a decision
 
-For a high-risk case (Zone 3b flood), the agent may call `get_flood_zone`,
+For a high-risk case (RoFRS High flood band), the agent may call `get_flood_zone`,
 immediately search guidelines for mandatory exclusions, and return **DECLINE**
 — never bothering with crime or claims checks. For a borderline case it will
 call all tools and still return **REFER**. A pipeline approach would always
@@ -89,8 +89,10 @@ api/orchestrator.py (MCP client)
       ▼
 mcp_servers/risk_server_v4.py (FastMCP server)
       ├── validate_submission()           → business logic
-      ├── get_flood_zone()                → Environment Agency flood API
-      │                                     + static Zone 3a/3b fallback layer
+      ├── get_flood_zone()                → EA Risk of Flooding from Rivers and
+      │                                     Sea (RoFRS) polygons, Greater London
+      │                                     + live EA flood warnings
+      │                                     + Flood Re eligibility (build year)
       ├── get_crime_index()               → data.police.uk street-level crime API
       │                                     (property crimes only; reports a
       │                                     multiple of the London median, and
@@ -113,7 +115,8 @@ mcp_servers/risk_server_v4.py (FastMCP server)
 | LLM — local | Ollama `llama3.1:8b` on GTX 1070 |
 | Tool protocol | MCP — Model Context Protocol (FastMCP, streamable-http) |
 | Knowledge base | UW guidelines inlined in the system prompt (~2.6k tokens) |
-| External APIs | Environment Agency flood, data.police.uk crime, HM Land Registry Price Paid |
+| Flood data | EA RoFRS shapefile (Greater London), read with a pure-Python point-in-polygon lookup |
+| External APIs | Environment Agency flood warnings, data.police.uk crime, HM Land Registry Price Paid |
 | Decision dispatch | Azure Storage Queues (accept / refer / decline) |
 | UI | Streamlit |
 | Infrastructure | Terraform (azurerm provider) |
@@ -128,13 +131,18 @@ mcp_servers/risk_server_v4.py (FastMCP server)
 uw_risk_agent/
 ├── api/
 │   ├── main.py                         # FastAPI service
+│   ├── schemas.py                      # Request / response models
 │   ├── orchestrator.py                 # Active orchestrator: Azure GPT-4.1 or Ollama
 │   ├── orchestrator_legacy.py          # Legacy Foundry Agent Service version
 │   └── ollama_orchestrator_legacy.py   # Legacy Ollama explicit-loop version
 ├── app.py                       # Streamlit broker-facing UI
 │
 ├── mcp_servers/
-│   └── risk_server_v4.py        # FastMCP server: 5 underwriting tools
+│   ├── risk_server_v4.py        # FastMCP server: 5 underwriting tools
+│   └── rofrs.py                 # RoFRS shapefile point lookup (stdlib only)
+│
+├── data/
+│   └── RoFRS_London/            # EA RoFRS extract, Greater London (EPSG:27700)
 │
 ├── models/
 │   ├── submission.py            # UnderwritingSubmission dataclass
@@ -151,7 +159,10 @@ uw_risk_agent/
 │   ├── terraform/               # Terraform IaC
 │   └── bicep/                   # Bicep alternative
 │
-├── tests/                       # Test cases
+├── tests/
+│   ├── test_server.py           # MCP tool tests
+│   └── uw_assess.postman_collection.json  # 12 test submissions
+├── start.sh / stop.sh           # Start / stop MCP server, API and UI
 ├── env.example
 ├── requirements.txt
 └── README.md
@@ -207,6 +218,19 @@ pip install -r requirements.txt
 
 ### Run locally
 
+The quickest way is the start/stop scripts. They launch the MCP server
+(`:8001`), the API (`:8010`) and the UI (`:8501`) in the background from
+`.venv`, write logs to `logs/` and pids to `.run/`:
+
+```bash
+./start.sh     # UI at http://localhost:8501, API docs at http://localhost:8010/docs
+./stop.sh      # stops all three and confirms the ports are free
+```
+
+Ports can be overridden with `MCP_PORT`, `API_PORT` and `UI_PORT`.
+
+Or run each process in its own terminal:
+
 ```bash
 # Terminal 1 — start the MCP server (real EA + Police + Land Registry APIs)
 python mcp_servers/risk_server_v4.py
@@ -247,6 +271,24 @@ Each assessment then returns a random `ACCEPT`, `DECLINE`, or `REFER` decision.
 The normal queue dispatch and human-review handling still run. Restart FastAPI
 after changing the flag.
 
+### Test cases
+
+[`tests/uw_assess.postman_collection.json`](tests/uw_assess.postman_collection.json)
+holds twelve `POST /assess` submissions, each with its expected outcome and
+the reason it exists — clean accept, High flood with pre-1920 timber,
+unassessed flood (outside London), unpublished crime data (Manchester),
+crime bands, claims anomaly, overinsurance against the Land Registry sale
+price, incomplete data, and the Flood Re 2009 build cut-off. Their postcodes
+were checked against the live tools. Import the collection into Postman to
+call the API directly.
+
+The **New Assessment** page reads the same collection: pick a case from the
+**Test cases** select box to pre-fill the form, then edit any field before
+submitting. The collection is the single source, so the UI and Postman
+cannot drift apart.
+
+### UI pages
+
 The Streamlit UI has two pages in its sidebar: **New Assessment** and
 **Case Review**. The review page presents the visible ACCEPT, DECLINE, and REFER
 records as underwriting cases, with applicant, property, coverage, claims, risk
@@ -274,55 +316,37 @@ terraform apply
 Provisions: Resource Group, OpenAI account (`gpt-4.1` + embedding deployments),
 AI Search, AI Foundry Hub + Project, Key Vault, Storage Account.
 
+AI Search and the embedding deployment are left over from the retired RAG
+design (see *Key design decisions*); the agent no longer uses them, and no
+ingest step is needed.
+
 ### 2. Configure environment
 
 ```bash
 terraform output -raw env_file_block > ../.env
 # Add AZURE_AI_PROJECT_ENDPOINT from Azure portal
-# Add AZURE_SEARCH_CONNECTION_ID from Foundry portal
+# Set UW_LLM_PROVIDER=azure
 ```
 
-### 3. Index UW guidelines
+### 3. Run
 
 ```bash
-python knowledge_base/ingest.py
-# Output: "Ingest complete — 12 chunks indexed into 'uw-guidelines'"
+./start.sh
 ```
 
-### 4. Run
-
-```bash
-# Terminal 1
-python mcp_servers/risk_server_v4.py
-
-# Terminal 2
-uvicorn api.main:app --port 8010 --reload
-
-# Terminal 3
-streamlit run app.py
-```
+Or start the three processes by hand, as in *Running locally*.
 
 ---
 
 ## Example output
 
-High-risk test case: BS1 4DJ, Bristol — timber frame 1912, 2 claims including
-subsidence, Zone 3a flood area.
+High-risk test case 02: TW1 3DY, Eel Pie Island, Twickenham — timber frame
+1912, 2 claims including subsidence. RoFRS reports **High** flood risk
+(>1 in 30 annual chance) at the property's grid reference. Pre-1920 timber
+combined with High flood is a mandatory decline in the guidelines, so the
+expected outcome is **DECLINE**.
 
-**Azure run (`gpt-4.1`, ~30-40 seconds):**
-
-```
-DECISION   : DECLINE
-CONFIDENCE : HIGH
-RATIONALE  : The property has timber construction dating to 1912 and is located
-             in Flood Zone 3a, categorised as high flood risk. The combination
-             of pre-1920 timber construction and Zone 3a flood is outside
-             underwriting appetite and flagged as a mandatory exclusion.
-FLAGS      : TIMBER_PRE_1920_HIGH_RISK, ZONE_3A_HIGH_FLOOD,
-             VERY_HIGH_PROPERTY_CRIME
-FLOOD RE   : Yes
-TIME       : 41655ms
-```
+**Azure run (`gpt-4.1`):** typically 10–40 seconds end to end.
 
 **Local run (`llama3.1:8b` on GTX 1070):**
 
@@ -348,11 +372,31 @@ deterministic and run concurrently with no model round-trips.
 
 ## Real UK government APIs used
 
-**Environment Agency Flood API**
-- `https://environment.data.gov.uk/flood-monitoring/api/floodAreas`
-- Returns active flood warnings within 5km of a postcode
-- Limitation: only returns active warnings — dry weather = Zone 1
-- Solution: static fallback layer for known high-risk postcodes (Zone 3a/3b)
+**Environment Agency — Risk of Flooding from Rivers and Sea (RoFRS)**
+- Published EA polygons, bundled as a Greater London shapefile in
+  `data/RoFRS_London/` (field `PROB_4BAND`, EPSG:27700)
+- The postcode is geocoded to an easting/northing and looked up per point
+  by [`mcp_servers/rofrs.py`](mcp_servers/rofrs.py) — pure standard library,
+  no GDAL/geopandas. Override the path with `ROFRS_SHAPEFILE`
+- Bands are the EA's own and account for flood defences:
+  High (>1 in 30), Medium (1 in 100 – 1 in 30), Low (1 in 1000 – 1 in 100),
+  Very Low (<1 in 1000)
+- Replaces the old postcode-district lookup table, which could not tell
+  TW1 3DY (Eel Pie Island, in the Thames) from TW1 3NP 150m away
+- Limitation: coverage is Greater London only. Outside it the band is
+  `Unassessed` and the case refers — never treated as low risk
+
+**Environment Agency Flood Warnings API**
+- `https://environment.data.gov.uk/flood-monitoring/id/floods`
+- Active warnings within 5km. A warning can only **raise** the mapped
+  RoFRS band (severity 1–2 → High, 3 → Medium), never lower it
+
+**Flood Re eligibility**
+- Only High and Medium bands qualify, and only for homes built before
+  1 January 2009. `get_flood_zone` takes `year_built`; without it the tool
+  reports `flood_re_eligible: false` and explains why rather than guessing.
+  Reporting eligibility from the band alone made every post-2009 floodplain
+  new-build look cessionable
 
 **data.police.uk Crime API**
 - `https://data.police.uk/api/crimes-street/all-crime`
