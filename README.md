@@ -280,7 +280,13 @@ unassessed flood (outside London), unpublished crime data (Manchester),
 crime bands, claims anomaly, overinsurance against the Land Registry sale
 price, incomplete data, and the Flood Re 2009 build cut-off. Their postcodes
 were checked against the live tools. Import the collection into Postman to
-call the API directly.
+call the API directly, or run all twelve as automated tests against the
+running stack, checking each decision against the case's expected outcome:
+
+```bash
+./start.sh
+pytest tests/test_assess_cases.py -v      # a few minutes; -k 02 for one case
+```
 
 The **New Assessment** page reads the same collection: pick a case from the
 **Test cases** select box to pre-fill the form, then edit any field before
@@ -365,7 +371,7 @@ deterministic and run concurrently with no model round-trips.
 | Protocol | JSON-RPC 2.0 — request / response / notification |
 | Primitives | Tools (5 underwriting tools) |
 | Client-side connector | Agent loop runs in-process, so a localhost MCP server works |
-| Security | System prompt hardening against prompt injection |
+| Security | System prompt treats submission fields and tool output as data, not instructions; suspected injection refers |
 | Inspection | FastMCP Inspector compatible |
 
 ---

@@ -26,6 +26,30 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Logging first: basicConfig(force=True) removes existing root handlers, so
+# running it after configure_azure_monitor would drop the log exporter.
+logging.basicConfig(
+    level=os.environ.get("UW_LOG_LEVEL", "INFO"),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    force=True,
+)
+logger = logging.getLogger(__name__)
+
+# Install the Azure Monitor exporter before FastAPI and the orchestrator are
+# imported. Without it the spans and metrics in monitor/telemetry.py go to
+# OpenTelemetry's no-op provider and are silently discarded. It must also
+# precede the FastAPI import for HTTP requests to be auto-instrumented.
+# Skipped when no connection string is set, so local runs need no Azure.
+if os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    from azure.monitor.opentelemetry import configure_azure_monitor
+
+    configure_azure_monitor(
+        connection_string=os.environ["APPLICATIONINSIGHTS_CONNECTION_STRING"]
+    )
+    logger.info("Telemetry: exporting to Application Insights")
+else:
+    logger.info("Telemetry: APPLICATIONINSIGHTS_CONNECTION_STRING not set, export disabled")
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -44,13 +68,6 @@ from .schemas import (
     FindingsResponse,
     HealthResponse,
 )
-
-logging.basicConfig(
-    level=os.environ.get("UW_LOG_LEVEL", "INFO"),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    force=True,          # configure_azure_monitor may already hold the root handler
-)
-logger = logging.getLogger(__name__)
 
 def check_configuration() -> None:
     """
