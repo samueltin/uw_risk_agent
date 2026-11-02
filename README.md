@@ -78,7 +78,8 @@ Broker submission
   recommended_premium_loading }
       │
    Every decision → Azure Storage Queue (accept / refer / decline)
-   REFER?          → also logged to the human review handler
+   REFER?          → uw-decisions-refer queue, shown on the Case Review page
+                     for an underwriter (review workflow not yet built)
 ```
 
 ### MCP Server architecture
@@ -268,8 +269,8 @@ MOCK_DECISION=true
 ```
 
 Each assessment then returns a random `ACCEPT`, `DECLINE`, or `REFER` decision.
-The normal queue dispatch and human-review handling still run. Restart FastAPI
-after changing the flag.
+Queue dispatch still runs as normal, so mock decisions appear on the Case
+Review page. Restart FastAPI after changing the flag.
 
 ### Test cases
 
@@ -302,6 +303,10 @@ flags, and rationale. It peeks at up to 32 messages from each configured Azure
 Storage queue without consuming them. It uses `AZURE_STORAGE_CONNECTION_STRING`
 when set, otherwise `DefaultAzureCredential` with
 `AZURE_STORAGE_ACCOUNT_NAME`.
+
+The page is read-only: there is no human review workflow yet. An underwriter
+can see REFER cases but cannot record a decision on them, and `_handle_refer`
+in `api/orchestrator.py` is only a logging stub.
 
 ---
 

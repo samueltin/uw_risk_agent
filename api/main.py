@@ -95,8 +95,9 @@ app = FastAPI(
     title="Underwriting Risk Assessment API",
     description=(
         "Agentic property underwriting on Microsoft Agent Framework. The "
-        "agent loop runs in-process against MCP risk tools and a RAG "
-        "guidelines index, driven by either Azure gpt-4.1 or a local Ollama model."
+        "agent loop runs in-process against MCP risk tools, with the full "
+        "underwriting guidelines in the system prompt, driven by either Azure "
+        "gpt-4.1 or a local Ollama model."
     ),
     version="1.0.0",
     lifespan=lifespan,

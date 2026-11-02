@@ -21,3 +21,7 @@ infra/validated_plan.txt
 # Runtime logs and pids from start.sh
 logs/
 .run/
+
+# Python bytecode
+__pycache__/
+*.pyc
